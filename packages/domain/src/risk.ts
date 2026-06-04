@@ -28,6 +28,7 @@ export const RiskPolicySchema = z.object({
   max_leverage: PositiveFiniteSchema,
   max_slippage_bps: BasisPointsSchema,
   max_daily_loss_usd: PositiveFiniteSchema.optional(),
+  max_drawdown_pct: z.number().finite().min(0).max(100).optional(),
   min_liquidity_score: z.number().finite().min(0).max(1).optional(),
   stale_after_ms: z.number().int().min(0),
   require_evidence_refs: z.boolean().default(true),

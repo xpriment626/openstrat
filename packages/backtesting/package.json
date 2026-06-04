@@ -16,6 +16,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@openstrat/domain": "workspace:*"
+    "@openstrat/domain": "workspace:*",
+    "@openstrat/persistence": "workspace:*",
+    "@openstrat/strategy-sdk": "workspace:*"
   }
 }

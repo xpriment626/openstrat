@@ -16,6 +16,7 @@ export const MarketStatusSchema = z.enum([
   "inactive",
   "ambiguous",
   "degraded",
+  "low_liquidity",
   "delisted",
   "read_only",
   "disallowed_by_policy"
@@ -42,12 +43,19 @@ export const PriceMethodSchema = z.enum([
 
 export const CandleIntervalSchema = z.enum([
   "1m",
+  "3m",
   "5m",
   "15m",
   "30m",
   "1h",
+  "2h",
   "4h",
-  "1d"
+  "8h",
+  "12h",
+  "1d",
+  "3d",
+  "1w",
+  "1M"
 ]);
 
 export const CandleMethodSchema = z.enum([
@@ -182,6 +190,18 @@ export const OrderbookSnapshotSchema = z
     }
   });
 
+export const FundingRateSnapshotSchema = z.object({
+  source: MarketDataSourceSchema,
+  venue: NonEmptyStringSchema.optional(),
+  symbol: NonEmptyStringSchema,
+  canonical_symbol: CanonicalSymbolSchema,
+  timestamp: IsoDateTimeSchema,
+  received_at: IsoDateTimeSchema,
+  funding_rate: z.number().finite(),
+  premium: z.number().finite().optional(),
+  raw_ref: SourceRefSchema.optional()
+});
+
 export type MarketStatus = z.infer<typeof MarketStatusSchema>;
 export type AssetClass = z.infer<typeof AssetClassSchema>;
 export type MarketDataSource = z.infer<typeof MarketDataSourceSchema>;
@@ -193,3 +213,4 @@ export type MarketDatum = z.infer<typeof MarketDatumSchema>;
 export type Candle = z.infer<typeof CandleSchema>;
 export type OrderbookLevel = z.infer<typeof OrderbookLevelSchema>;
 export type OrderbookSnapshot = z.infer<typeof OrderbookSnapshotSchema>;
+export type FundingRateSnapshot = z.infer<typeof FundingRateSnapshotSchema>;

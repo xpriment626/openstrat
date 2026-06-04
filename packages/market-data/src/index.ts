@@ -30,3 +30,5 @@ export interface MarketDataReader {
   getCandles(query: CandleQuery): Promise<Candle[]>;
   getOrderbookSnapshot(query: OrderbookQuery): Promise<OrderbookSnapshot>;
 }
+
+export * from "./hyperliquid/index.js";

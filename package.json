@@ -7,7 +7,9 @@
   "scripts": {
     "build": "pnpm -r --sort run build",
     "format:check": "prettier --check .",
+    "ingest:hyperliquid": "pnpm --filter @openstrat/market-data ingest:hyperliquid --",
     "lint": "eslint .",
+    "smoke:live:hyperliquid": "pnpm --filter @openstrat/market-data smoke:live:hyperliquid",
     "test": "vitest run",
     "typecheck": "pnpm -r --sort run typecheck"
   },

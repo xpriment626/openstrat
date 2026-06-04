@@ -35,6 +35,12 @@ importers:
       '@openstrat/domain':
         specifier: workspace:*
         version: link:../domain
+      '@openstrat/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      '@openstrat/strategy-sdk':
+        specifier: workspace:*
+        version: link:../strategy-sdk
 
   packages/domain:
     dependencies:
@@ -47,6 +53,12 @@ importers:
       '@openstrat/domain':
         specifier: workspace:*
         version: link:../domain
+      '@openstrat/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      zod:
+        specifier: latest
+        version: 4.4.3
 
   packages/persistence:
     dependencies:

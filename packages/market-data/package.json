@@ -13,9 +13,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "ingest:hyperliquid": "node dist/cli/ingest-hyperliquid.js",
+    "smoke:live:hyperliquid": "pnpm run build && node dist/hyperliquid/live-smoke.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@openstrat/domain": "workspace:*"
+    "@openstrat/domain": "workspace:*",
+    "@openstrat/persistence": "workspace:*",
+    "zod": "latest"
   }
 }
