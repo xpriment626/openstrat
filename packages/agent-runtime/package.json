@@ -19,6 +19,7 @@
     "@earendil-works/pi-coding-agent": "^0.78.1",
     "@openstrat/domain": "workspace:*",
     "@openstrat/persistence": "workspace:*",
-    "@openstrat/workers": "workspace:*"
+    "@openstrat/workers": "workspace:*",
+    "zod": "latest"
   }
 }

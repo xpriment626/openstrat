@@ -44,6 +44,9 @@ importers:
       '@openstrat/workers':
         specifier: workspace:*
         version: link:../workers
+      zod:
+        specifier: latest
+        version: 4.4.3
 
   packages/backtesting:
     dependencies:
