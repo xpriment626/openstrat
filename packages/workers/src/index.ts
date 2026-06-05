@@ -19,4 +19,5 @@ export interface HarnessWorker {
   stop(): Promise<void>;
 }
 
+export * from "./agent-tool-gateway.js";
 export * from "./deployment.js";
