@@ -102,6 +102,8 @@ export type PiAgentSessionEvent =
   | {
       type: "message_update";
       delta?: string;
+      assistantMessageEvent?: unknown;
+      message?: unknown;
     };
 
 interface ActivePiSession {
@@ -500,7 +502,7 @@ function projectPiEvent(
       transcript_ref: runtime.transcript_ref,
       type: "agent.runtime.message_delta",
       payload: {
-        delta: event.delta ?? ""
+        delta: messageUpdateDelta(event)
       }
     });
     return;
@@ -512,9 +514,54 @@ function projectPiEvent(
     transcript_ref: runtime.transcript_ref,
     type: "agent.runtime.turn_completed",
     payload: {
-      message_count: event.messages?.length ?? 0
+      message_count: event.messages?.length ?? 0,
+      ...finalAssistantTextPayload(event.messages)
     }
   });
+}
+
+function messageUpdateDelta(
+  event: Extract<PiAgentSessionEvent, { type: "message_update" }>
+): string {
+  const assistantEvent = event.assistantMessageEvent;
+  if (
+    isRecord(assistantEvent) &&
+    assistantEvent.type === "text_delta" &&
+    typeof assistantEvent.delta === "string"
+  ) {
+    return assistantEvent.delta;
+  }
+  return event.delta ?? "";
+}
+
+function finalAssistantTextPayload(messages: unknown[] | undefined): {
+  assistant_text?: string;
+} {
+  let assistant: unknown;
+  for (const message of messages ?? []) {
+    if (isRecord(message) && message.role === "assistant") {
+      assistant = message;
+    }
+  }
+  const assistantText = extractAssistantText(assistant);
+  return assistantText ? { assistant_text: assistantText } : {};
+}
+
+function extractAssistantText(message: unknown): string {
+  if (!isRecord(message) || !Array.isArray(message.content)) {
+    return "";
+  }
+  return message.content
+    .map((content) =>
+      isRecord(content) && content.type === "text" && typeof content.text === "string"
+        ? content.text
+        : ""
+    )
+    .join("");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 class FakePiAgentSession implements PiAgentSessionLike {

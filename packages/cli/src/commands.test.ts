@@ -70,6 +70,24 @@ describe("openstrat CLI commands", () => {
     expect(doctor.stdout.join("\n")).not.toContain("fake-refresh-token");
   });
 
+  it("prints final assistant text when Pi does not stream text deltas", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const chat = await runOpenStratCli({
+      argv: ["chat", "--prompt", "hello"],
+      cwd,
+      env: {
+        HOME: userHome,
+        OPENSTRAT_FAKE_PI: "1",
+        OPENSTRAT_FAKE_PI_FINAL_ONLY: "1"
+      }
+    });
+
+    expect(chat.exitCode).toBe(0);
+    expect(chat.stdout.join("\n")).toContain("Final assistant text from Pi.");
+    expect(chat.stdout.join("\n")).not.toContain("OpenStrat chat session completed.");
+  });
+
   it("generates explicit upgrade commands and never self-updates silently", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));

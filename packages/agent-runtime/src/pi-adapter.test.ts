@@ -110,6 +110,59 @@ describe("Pi agent runtime adapter", () => {
     ]);
   });
 
+  it("normalizes real Pi assistant message updates and final text", async () => {
+    const events = new SqliteEventLog(":memory:");
+    const assistant = assistantMessage("Hello from Pi.");
+    const adapter = createPiAgentRuntimeAdapter({
+      events,
+      now: () => now,
+      sessionFactory: createFakePiAgentSessionFactory({
+        events: [
+          {
+            type: "message_update",
+            message: assistant,
+            assistantMessageEvent: {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "Hello from Pi.",
+              partial: assistant
+            }
+          },
+          {
+            type: "agent_end",
+            messages: [userMessage("hello"), assistant],
+            willRetry: false
+          }
+        ] as never
+      })
+    });
+
+    const session = await adapter.startSession({
+      manifest: minimalManifest("agent_session_real_pi_text"),
+      toolNames: ["market_data.read_snapshot"]
+    });
+
+    await adapter.prompt({
+      session_id: session.session_id,
+      prompt: "hello"
+    });
+
+    const stream = events.list("agent_sessions/agent_session_real_pi_text");
+    expect(stream.at(2)).toMatchObject({
+      type: "agent.runtime.message_delta",
+      payload: {
+        delta: "Hello from Pi."
+      }
+    });
+    expect(stream.at(-1)).toMatchObject({
+      type: "agent.runtime.turn_completed",
+      payload: {
+        message_count: 2,
+        assistant_text: "Hello from Pi."
+      }
+    });
+  });
+
   it("records forbidden model-requested Pi/native tools as blocked runtime events", async () => {
     const events = new SqliteEventLog(":memory:");
     const adapter = createPiAgentRuntimeAdapter({
@@ -301,5 +354,39 @@ function minimalManifest(id: string) {
     event_stream_id: `agent_sessions/${id}`,
     tool_grant_ids: [],
     canonical_ledger_refs: []
+  };
+}
+
+function userMessage(text: string) {
+  return {
+    role: "user",
+    content: text,
+    timestamp: Date.parse(now)
+  };
+}
+
+function assistantMessage(text: string) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "responses",
+    provider: "openai",
+    model: "gpt-5.5",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0
+      }
+    },
+    stopReason: "stop",
+    timestamp: Date.parse(now)
   };
 }

@@ -204,15 +204,9 @@ async function commandChat(options: {
   const sessionFactory =
     options.env.OPENSTRAT_FAKE_PI === "1"
       ? createFakePiAgentSessionFactory({
-          events: [
-            { type: "message_update", delta: "Hello from OpenStrat." },
-            {
-              type: "tool_execution_start",
-              toolCallId: "tool_call_native_write",
-              toolName: "write"
-            },
-            { type: "agent_end", messages: [] }
-          ]
+          events: fakePiChatEvents({
+            finalOnly: options.env.OPENSTRAT_FAKE_PI_FINAL_ONLY === "1"
+          })
         })
       : createPersistedPiSessionFactory(options.home);
   const adapter = createPiAgentRuntimeAdapter({
@@ -265,7 +259,11 @@ async function commandChat(options: {
     .filter((event) => event.type === "agent.runtime.message_delta")
     .map((event) => (event.payload as { delta?: string }).delta ?? "")
     .join("");
-  options.emitOut(deltas || "OpenStrat chat session completed.");
+  options.emitOut(
+    deltas ||
+      finalAssistantTextFromStream(stream) ||
+      "OpenStrat chat session completed."
+  );
   options.emitOut(`session: ${sessionId}`);
   options.emitOut(`transcript: ${runtime.transcript_ref}`);
   options.emitOut(`disabled native tools: ${runtime.disabled_builtin_tools.join(",")}`);
@@ -453,6 +451,94 @@ function parseUpgradeArgs(argv: string[]): {
       ? { version: argv[versionIndex + 1] }
       : {})
   };
+}
+
+function fakePiChatEvents(options: { finalOnly: boolean }) {
+  const text = options.finalOnly
+    ? "Final assistant text from Pi."
+    : "Hello from OpenStrat.";
+  const assistant = fakeAssistantMessage(text);
+  return [
+    ...(options.finalOnly
+      ? []
+      : [
+          {
+            type: "message_update",
+            message: assistant,
+            assistantMessageEvent: {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: text,
+              partial: assistant
+            }
+          }
+        ]),
+    {
+      type: "tool_execution_start",
+      toolCallId: "tool_call_native_write",
+      toolName: "write"
+    },
+    {
+      type: "agent_end",
+      messages: [fakeUserMessage("hello"), assistant],
+      willRetry: false
+    }
+  ] as never;
+}
+
+function fakeUserMessage(text: string) {
+  return {
+    role: "user",
+    content: text,
+    timestamp: Date.now()
+  };
+}
+
+function fakeAssistantMessage(text: string) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "responses",
+    provider: "openai",
+    model: "gpt-5.5",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0
+      }
+    },
+    stopReason: "stop",
+    timestamp: Date.now()
+  };
+}
+
+function finalAssistantTextFromStream(
+  stream: readonly { type: string; payload: unknown }[]
+): string {
+  for (let index = stream.length - 1; index >= 0; index -= 1) {
+    const event = stream[index];
+    if (event?.type !== "agent.runtime.turn_completed") {
+      continue;
+    }
+    const payload = event.payload;
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "assistant_text" in payload &&
+      typeof payload.assistant_text === "string"
+    ) {
+      return payload.assistant_text;
+    }
+  }
+  return "";
 }
 
 function createPersistedPiSessionFactory(home: OpenStratHome): PiAgentSessionFactory {
