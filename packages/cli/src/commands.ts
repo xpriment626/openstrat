@@ -22,9 +22,11 @@ import {
 import { runCandleBacktest } from "@openstrat/backtesting";
 import {
   BacktestReportSchema,
+  BotRunManifestSchema,
   DecisionLedgerEntrySchema,
   DeploymentGateSchema,
   MemoryProposalSchema,
+  type BotRunManifest,
   type DeploymentGate
 } from "@openstrat/domain";
 import {
@@ -44,7 +46,10 @@ import {
 import {
   type AgentToolGateway,
   createAgentToolGateway,
-  type DeploymentGateInspection
+  type DeploymentGateInspection,
+  FlyMachineDeploymentProvider,
+  LocalTerminalDeploymentProvider,
+  SpriteMicrovmDeploymentProvider
 } from "@openstrat/workers";
 import {
   ensureOpenStratHome,
@@ -187,7 +192,7 @@ export async function runOpenStratCli(
         await commandGate({ argv, emitOut, home });
         break;
       case "deploy":
-        await commandDeploy({ argv, emitOut, home });
+        await commandDeploy({ argv, cwd, emitOut, home });
         break;
       case "ledger":
         await commandLedger({ argv, emitOut, home });
@@ -396,6 +401,7 @@ async function commandGateInspect(options: {
 
 async function commandDeploy(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
   home: OpenStratHome;
 }): Promise<void> {
@@ -404,8 +410,11 @@ async function commandDeploy(options: {
     case "plan":
       await commandDeployPlan(options);
       return;
+    case "handoff":
+      await commandDeployHandoff(options);
+      return;
     default:
-      throw new Error("Usage: openstrat deploy plan --gate-ref <GATE_REF>");
+      throw new Error("Usage: openstrat deploy <plan --gate-ref|handoff --target>");
   }
 }
 
@@ -430,6 +439,113 @@ async function commandDeployPlan(options: {
   options.emitOut(`mode: ${loaded.gate.deployment.mode}`);
   options.emitOut(`duration_hours: ${loaded.gate.deployment.duration_hours}`);
   options.emitOut(`max_notional_usd: ${loaded.gate.deployment.max_notional_usd}`);
+}
+
+async function commandDeployHandoff(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const targetKind = requiredFlag(options.argv, "--target");
+  const gateRef = requiredFlag(options.argv, "--gate-ref");
+  const backtestReportRef = requiredFlag(options.argv, "--backtest-report-ref");
+  const riskPolicyRef = requiredFlag(options.argv, "--risk-policy-ref");
+  const strategyManifestRef = requiredFlag(options.argv, "--strategy-manifest-ref");
+  const decisionRef = stringFlag(options.argv, "--decision-ref");
+  const memoryProposalRef = stringFlag(options.argv, "--memory-proposal-ref");
+  const store = new FileObjectStore(options.home.objectsDir);
+  const loadedGate = readDeploymentGateRef(store, gateRef);
+  const gateInspection = await inspectGateWithGateway(
+    options.home,
+    store,
+    loadedGate.gate
+  );
+  if (!gateInspection.ready) {
+    throw new Error(
+      `deployment gate is not ready: ${gateInspection.missing_requirements.join("; ")}`
+    );
+  }
+
+  const report = BacktestReportSchema.parse(store.getJson(backtestReportRef));
+  if (report.strategy_id !== loadedGate.gate.strategy_id) {
+    throw new Error("Deployment handoff refs must point at the same strategy");
+  }
+  ensureSampleStrategyManifest(store, strategyManifestRef, loadedGate.gate);
+
+  const createdAt = new Date().toISOString();
+  const durationMs = loadedGate.gate.deployment.duration_hours * 60 * 60 * 1000;
+  const manifest = BotRunManifestSchema.parse({
+    id: `bot_run_${Date.now()}_${safeRefSegment(
+      loadedGate.gate.strategy_id
+    )}_${safeRefSegment(targetKind)}`,
+    strategy_id: loadedGate.gate.strategy_id,
+    strategy_version: loadedGate.gate.strategy_version,
+    deployment_gate_id: loadedGate.gate.id,
+    target: deploymentTargetFromArgs(options.argv, targetKind, options.cwd),
+    runtime: {
+      mode: runtimeModeForGate(loadedGate.gate),
+      heartbeat_interval_ms: 30_000,
+      max_runtime_ms: durationMs,
+      reliability_boundary_acknowledged:
+        targetKind !== "local_terminal" ||
+        options.argv.includes("--ack-local-reliability")
+    },
+    approval_refs: {
+      strategy_manifest_ref: strategyManifestRef,
+      deployment_gate_ref: gateRef,
+      backtest_report_ref: backtestReportRef,
+      risk_policy_ref: riskPolicyRef
+    },
+    created_at: createdAt,
+    starts_at: createdAt,
+    ends_at: new Date(Date.parse(createdAt) + durationMs).toISOString()
+  });
+  const provider = deploymentProviderFor(manifest.target.kind);
+  const plan = provider.prepare(manifest);
+  const validation = provider.validate(plan);
+  const refs = deploymentHandoffRefs(manifest.id);
+  store.putJson(refs.manifest_ref, manifest);
+  store.putJson(refs.plan_ref, plan);
+  store.putJson(refs.handoff_ref, {
+    id: `${manifest.id}_handoff`,
+    created_at: createdAt,
+    manifest_ref: refs.manifest_ref,
+    plan_ref: refs.plan_ref,
+    provider_kind: plan.provider_kind,
+    remote: plan.remote,
+    launch: "not_launched",
+    validation,
+    ...(decisionRef ? { decision_ref: decisionRef } : {}),
+    ...(memoryProposalRef ? { memory_proposal_ref: memoryProposalRef } : {})
+  });
+
+  const events = new SqliteEventLog(options.home.stateDbPath);
+  try {
+    events.append({
+      stream_id: `deployment-handoffs/${manifest.id}`,
+      type: "deployment.handoff.created",
+      occurred_at: createdAt,
+      payload: {
+        manifest_ref: refs.manifest_ref,
+        plan_ref: refs.plan_ref,
+        handoff_ref: refs.handoff_ref,
+        provider_kind: plan.provider_kind,
+        remote: plan.remote,
+        validation
+      }
+    });
+  } finally {
+    events.close();
+  }
+
+  options.emitOut(`manifest: ${refs.manifest_ref}`);
+  options.emitOut(`plan: ${refs.plan_ref}`);
+  options.emitOut(`handoff: ${refs.handoff_ref}`);
+  options.emitOut(`target: ${plan.target_kind}`);
+  options.emitOut(`remote: ${plan.remote ? "yes" : "no"}`);
+  options.emitOut(`validation: ${validation.ok ? "ok" : validation.errors.join("; ")}`);
 }
 
 async function commandLedger(options: {
@@ -1327,6 +1443,97 @@ function proposalArtifactRef(
     append_only: true as const,
     metadata
   };
+}
+
+function deploymentTargetFromArgs(
+  argv: readonly string[],
+  targetKind: string,
+  cwd: string
+): BotRunManifest["target"] {
+  switch (targetKind) {
+    case "local_terminal":
+      return {
+        kind: "local_terminal",
+        workspace_path: stringFlag(argv, "--workspace-path") ?? cwd,
+        reliability_boundary:
+          "Local execution depends on this machine staying awake, online, and authorized."
+      };
+    case "fly_machine":
+      return {
+        kind: "fly_machine",
+        app_name: requiredFlag(argv, "--app-name"),
+        ...optionalFlag(argv, "--region", "region")
+      };
+    case "sprite_microvm":
+      return {
+        kind: "sprite_microvm",
+        project: requiredFlag(argv, "--project"),
+        ...optionalFlag(argv, "--image", "image")
+      };
+    default:
+      throw new Error(
+        "Unsupported deployment target. Use local_terminal, fly_machine, or sprite_microvm."
+      );
+  }
+}
+
+function runtimeModeForGate(gate: DeploymentGate): BotRunManifest["runtime"]["mode"] {
+  switch (gate.deployment.mode) {
+    case "draft_orders":
+      return "draft";
+    case "constrained_live":
+    case "adaptive_management":
+      return "live";
+    default:
+      return "paper";
+  }
+}
+
+function deploymentProviderFor(kind: BotRunManifest["target"]["kind"]) {
+  switch (kind) {
+    case "local_terminal":
+      return new LocalTerminalDeploymentProvider();
+    case "fly_machine":
+      return new FlyMachineDeploymentProvider();
+    case "sprite_microvm":
+      return new SpriteMicrovmDeploymentProvider();
+  }
+}
+
+function deploymentHandoffRefs(botRunId: string): {
+  handoff_ref: string;
+  manifest_ref: string;
+  plan_ref: string;
+} {
+  const root = `deployment-handoffs/${safeRefSegment(botRunId)}`;
+  return {
+    manifest_ref: `${root}/manifest.json`,
+    plan_ref: `${root}/plan.json`,
+    handoff_ref: `${root}/handoff.json`
+  };
+}
+
+function ensureSampleStrategyManifest(
+  store: FileObjectStore,
+  strategyManifestRef: string,
+  gate: DeploymentGate
+): void {
+  if (store.exists(strategyManifestRef)) {
+    return;
+  }
+  if (gate.strategy_id !== movingAverageBreakoutStrategy.manifest.strategy_id) {
+    throw new Error(`Strategy manifest not found: ${strategyManifestRef}`);
+  }
+  store.putJson(strategyManifestRef, movingAverageBreakoutStrategy.manifest);
+}
+
+function optionalFlag<Key extends string>(
+  argv: readonly string[],
+  flag: string,
+  key: Key
+): Partial<Record<Key, string>> {
+  const value = stringFlag(argv, flag);
+  return value ? ({ [key]: value } as Partial<Record<Key, string>>) : {};
 }
 
 function safeRefSegment(value: string): string {

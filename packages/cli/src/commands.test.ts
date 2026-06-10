@@ -599,6 +599,247 @@ describe("openstrat CLI commands", () => {
     }
   });
 
+  it("creates deployment handoff manifests from the full evidence chain", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = { HOME: userHome };
+
+    const ingest = await runOpenStratCli({
+      argv: ["market", "ingest-fixture", "--symbol", "BTC", "--interval", "15m"],
+      cwd,
+      env
+    });
+    const datasetRef = ingest.stdout
+      .find((line) => line.startsWith("dataset: "))
+      ?.replace("dataset: ", "");
+    const backtest = await runOpenStratCli({
+      argv: [
+        "backtest",
+        "run-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef ?? "",
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10"
+      ],
+      cwd,
+      env
+    });
+    const reportRef = backtest.stdout
+      .find((line) => line.startsWith("report: "))
+      ?.replace("report: ", "");
+    const gate = await runOpenStratCli({
+      argv: [
+        "gate",
+        "create-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--risk-policy-ref",
+        "risk/sample",
+        "--ready"
+      ],
+      cwd,
+      env
+    });
+    const gateRef = gate.stdout
+      .find((line) => line.startsWith("gate: "))
+      ?.replace("gate: ", "");
+    const decision = await runOpenStratCli({
+      argv: [
+        "ledger",
+        "record-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--gate-ref",
+        gateRef ?? ""
+      ],
+      cwd,
+      env
+    });
+    const decisionRef = decision.stdout
+      .find((line) => line.startsWith("decision: "))
+      ?.replace("decision: ", "");
+    const memory = await runOpenStratCli({
+      argv: [
+        "memory",
+        "propose-sample",
+        "--decision-ref",
+        decisionRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--gate-ref",
+        gateRef ?? ""
+      ],
+      cwd,
+      env
+    });
+    const memoryRef = memory.stdout
+      .find((line) => line.startsWith("artifact: "))
+      ?.replace("artifact: ", "");
+    const strategyManifestRef =
+      "strategies/sample_moving_average_breakout/manifest.json";
+
+    const localHandoff = await runOpenStratCli({
+      argv: [
+        "deploy",
+        "handoff",
+        "--target",
+        "local_terminal",
+        "--gate-ref",
+        gateRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--risk-policy-ref",
+        "risk/sample",
+        "--strategy-manifest-ref",
+        strategyManifestRef,
+        "--decision-ref",
+        decisionRef ?? "",
+        "--memory-proposal-ref",
+        memoryRef ?? "",
+        "--ack-local-reliability"
+      ],
+      cwd,
+      env
+    });
+    const localManifestRef = localHandoff.stdout
+      .find((line) => line.startsWith("manifest: "))
+      ?.replace("manifest: ", "");
+    const localPlanRef = localHandoff.stdout
+      .find((line) => line.startsWith("plan: "))
+      ?.replace("plan: ", "");
+    const localHandoffRef = localHandoff.stdout
+      .find((line) => line.startsWith("handoff: "))
+      ?.replace("handoff: ", "");
+
+    expect(localHandoff.exitCode).toBe(0);
+    expect(localHandoff.stdout.join("\n")).toContain("remote: no");
+    expect(localManifestRef).toContain("deployment-handoffs/");
+    expect(localPlanRef).toContain("deployment-handoffs/");
+    expect(localHandoffRef).toContain("deployment-handoffs/");
+
+    const localManifest = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", localManifestRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      approval_refs: Record<string, string>;
+      runtime: { mode: string; reliability_boundary_acknowledged: boolean };
+      target: { kind: string; workspace_path: string };
+    };
+    const localPlan = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", localPlanRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      guarantees: string[];
+      remote: boolean;
+      target_kind: string;
+    };
+    const localHandoffArtifact = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", localHandoffRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      decision_ref: string;
+      memory_proposal_ref: string;
+      validation: { ok: boolean };
+    };
+    const strategyManifest = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", strategyManifestRef),
+        "utf8"
+      )
+    ) as { strategy_id: string };
+
+    expect(localManifest).toMatchObject({
+      approval_refs: {
+        backtest_report_ref: reportRef,
+        deployment_gate_ref: gateRef,
+        risk_policy_ref: "risk/sample",
+        strategy_manifest_ref: strategyManifestRef
+      },
+      runtime: {
+        mode: "paper",
+        reliability_boundary_acknowledged: true
+      },
+      target: {
+        kind: "local_terminal",
+        workspace_path: cwd
+      }
+    });
+    expect(localPlan).toMatchObject({
+      remote: false,
+      target_kind: "local_terminal"
+    });
+    expect(localPlan.guarantees).toEqual(
+      expect.arrayContaining(["heartbeat_required", "risk_gate_required"])
+    );
+    expect(localHandoffArtifact).toMatchObject({
+      decision_ref: decisionRef,
+      memory_proposal_ref: memoryRef,
+      validation: { ok: true }
+    });
+    expect(strategyManifest.strategy_id).toBe("sample_moving_average_breakout");
+
+    const flyHandoff = await runOpenStratCli({
+      argv: [
+        "deploy",
+        "handoff",
+        "--target",
+        "fly_machine",
+        "--gate-ref",
+        gateRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--risk-policy-ref",
+        "risk/sample",
+        "--strategy-manifest-ref",
+        strategyManifestRef,
+        "--app-name",
+        "openstrat-bot",
+        "--region",
+        "iad"
+      ],
+      cwd,
+      env
+    });
+    const flyPlanRef = flyHandoff.stdout
+      .find((line) => line.startsWith("plan: "))
+      ?.replace("plan: ", "");
+    const flyPlan = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", flyPlanRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      remote: boolean;
+      required_cli: string;
+      target_kind: string;
+    };
+
+    expect(flyHandoff.exitCode).toBe(0);
+    expect(flyHandoff.stdout.join("\n")).toContain("remote: yes");
+    expect(flyHandoff.stdout.join("\n")).toContain("validation: fly CLI unavailable");
+    expect(flyPlan).toMatchObject({
+      remote: true,
+      required_cli: "fly",
+      target_kind: "fly_machine"
+    });
+  });
+
   it("generates explicit upgrade commands and never self-updates silently", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
