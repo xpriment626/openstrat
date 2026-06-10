@@ -3,7 +3,11 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteEventLog } from "@openstrat/persistence";
+import type { MarketDatum, MarketRegistryEntry, RiskReview } from "@openstrat/domain";
+import type { MarketDataReader } from "@openstrat/market-data";
+import { SqliteEventLog, type ObjectStore } from "@openstrat/persistence";
+import type { RiskPolicyEngine } from "@openstrat/risk";
+import { createAgentToolGateway } from "@openstrat/workers";
 import {
   createFakePiAgentSessionFactory,
   createPiAgentRuntimeAdapter,
@@ -108,6 +112,81 @@ describe("Pi agent runtime adapter", () => {
       "agent.runtime.tool_call_completed",
       "agent.runtime.turn_completed"
     ]);
+  });
+
+  it("routes fake Pi market data tool requests through the agent tool gateway", async () => {
+    const events = new SqliteEventLog(":memory:");
+    const gateway = createAgentToolGateway({
+      events,
+      marketData: new StubMarketDataReader(),
+      objects: new MemoryObjectStore(),
+      risk: stubRiskEngine(),
+      now: () => now
+    });
+    const adapter = createPiAgentRuntimeAdapter({
+      events,
+      now: () => now,
+      toolGateway: gateway,
+      sessionFactory: createFakePiAgentSessionFactory({
+        events: [
+          {
+            type: "tool_execution_start",
+            toolCallId: "tool_call_market",
+            toolName: "market_data.read_snapshot",
+            arguments: {
+              canonical_symbol: "ETH-PERP"
+            }
+          },
+          {
+            type: "agent_end",
+            messages: []
+          }
+        ] as never
+      })
+    });
+
+    const session = await adapter.startSession({
+      manifest: minimalManifest("agent_session_gateway_market"),
+      toolNames: ["market_data.read_snapshot"]
+    });
+
+    await adapter.prompt({
+      session_id: session.session_id,
+      prompt: "Read the latest ETH market data."
+    });
+
+    expect(
+      events.list("agent_sessions/agent_session_gateway_market").map((event) => ({
+        type: event.type,
+        payload: event.payload
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "agent.runtime.tool_call_requested",
+          payload: expect.objectContaining({
+            tool_call_id: "tool_call_market",
+            tool_name: "market_data.read_snapshot"
+          })
+        }),
+        expect.objectContaining({
+          type: "agent.tool_call.completed",
+          payload: expect.objectContaining({
+            tool_call_id: "tool_call_market",
+            tool_name: "market_data.read_snapshot",
+            result_ref: "market-data/hyperliquid/eth/latest.json"
+          })
+        }),
+        expect.objectContaining({
+          type: "agent.runtime.tool_call_completed",
+          payload: expect.objectContaining({
+            tool_call_id: "tool_call_market",
+            tool_name: "market_data.read_snapshot",
+            is_error: false
+          })
+        })
+      ])
+    );
   });
 
   it("normalizes real Pi assistant message updates and final text", async () => {
@@ -388,5 +467,91 @@ function assistantMessage(text: string) {
     },
     stopReason: "stop",
     timestamp: Date.parse(now)
+  };
+}
+
+class MemoryObjectStore implements ObjectStore {
+  readonly values = new Map<string, unknown>();
+
+  putBytes(ref: string, bytes: Uint8Array): void {
+    this.values.set(ref, Buffer.from(bytes).toString("utf8"));
+  }
+
+  getBytes(ref: string): Buffer {
+    const value = this.values.get(ref);
+    if (typeof value !== "string") {
+      throw new Error(`missing bytes: ${ref}`);
+    }
+    return Buffer.from(value);
+  }
+
+  putJson(ref: string, value: unknown): void {
+    this.values.set(ref, value);
+  }
+
+  getJson<T = unknown>(ref: string): T {
+    if (!this.values.has(ref)) {
+      throw new Error(`missing json: ${ref}`);
+    }
+    return this.values.get(ref) as T;
+  }
+
+  exists(ref: string): boolean {
+    return this.values.has(ref);
+  }
+}
+
+class StubMarketDataReader implements MarketDataReader {
+  async getMarket(canonicalSymbol: string): Promise<MarketRegistryEntry | undefined> {
+    return {
+      canonical_symbol: canonicalSymbol,
+      display_symbol: "ETH",
+      venue_symbol: "ETH",
+      venue: "hyperliquid",
+      source: "hyperliquid",
+      asset_class: "crypto",
+      quote_token: "USDC",
+      collateral_token: "USDC",
+      max_leverage: 50,
+      min_order_size: 0.001,
+      tick_size: 0.1,
+      lot_size: 0.0001,
+      status: "active",
+      liquidity_score: 0.9,
+      last_verified_at: now,
+      source_refs: ["market-registry/hyperliquid/eth.json"]
+    };
+  }
+
+  async getLatestPrice(): Promise<MarketDatum> {
+    return {
+      value: 3500,
+      source: "hyperliquid",
+      venue: "hyperliquid",
+      symbol: "ETH",
+      canonical_symbol: "ETH-PERP",
+      method: "mark",
+      timestamp: now,
+      received_at: now,
+      stale_after_ms: 5000,
+      confidence: 0.99,
+      raw_ref: "market-data/hyperliquid/eth/latest.json"
+    };
+  }
+
+  async getCandles(): Promise<never> {
+    throw new Error("not used");
+  }
+
+  async getOrderbookSnapshot(): Promise<never> {
+    throw new Error("not used");
+  }
+}
+
+function stubRiskEngine(): RiskPolicyEngine {
+  return {
+    async review(): Promise<RiskReview> {
+      throw new Error("not used");
+    }
   };
 }

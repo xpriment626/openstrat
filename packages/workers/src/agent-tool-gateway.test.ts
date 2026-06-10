@@ -100,6 +100,37 @@ describe("agent tool gateway", () => {
     ]);
   });
 
+  it("dispatches supported invoke calls through typed gateway methods", async () => {
+    const { events, gateway } = createGatewayFixture();
+
+    const result = await gateway.invoke({
+      tool_name: "market_data.read_snapshot",
+      call_id: "tool_call_invoke_market",
+      session_id: "agent_session_001",
+      turn_id: "turn_001",
+      arguments: {
+        canonical_symbol: "ETH-PERP"
+      }
+    });
+
+    expect(result).toMatchObject({
+      market: {
+        canonical_symbol: "ETH-PERP"
+      },
+      latest_price: {
+        value: 3500
+      }
+    });
+    expect(events.list("agent_sessions/agent_session_001").at(-1)).toMatchObject({
+      type: "agent.tool_call.completed",
+      payload: {
+        tool_call_id: "tool_call_invoke_market",
+        tool_name: "market_data.read_snapshot",
+        side_effect: "none"
+      }
+    });
+  });
+
   it("captures backtest, strategy, and memory proposals as append-only artifacts", async () => {
     const { events, gateway, objects } = createGatewayFixture();
 

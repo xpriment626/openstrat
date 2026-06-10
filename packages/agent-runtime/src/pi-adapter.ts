@@ -3,7 +3,7 @@ import {
   type AgentSessionManifest
 } from "@openstrat/domain";
 import type { EventLogRepository } from "@openstrat/persistence";
-import type { AgentToolGatewayToolName } from "@openstrat/workers";
+import type { AgentToolGateway, AgentToolGatewayToolName } from "@openstrat/workers";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgentRuntimePolicyEnforcer } from "./runtime-policy.js";
@@ -16,6 +16,7 @@ export interface PiRuntimeAdapterDependencies {
   now?: () => string;
   policy?: AgentRuntimePolicyEnforcer;
   sessionFactory?: PiAgentSessionFactory;
+  toolGateway?: AgentToolGateway;
   transcriptStore?: PiTranscriptStore;
 }
 
@@ -74,7 +75,7 @@ export interface PiAgentSessionFactoryInput {
 
 export interface PiAgentSessionLike {
   readonly sessionId: string;
-  subscribe(listener: (event: PiAgentSessionEvent) => void): () => void;
+  subscribe(listener: (event: PiAgentSessionEvent) => void | Promise<void>): () => void;
   prompt(prompt: string): Promise<void>;
   dispose(): void | Promise<void>;
 }
@@ -88,6 +89,7 @@ export type PiAgentSessionEvent =
       type: "tool_execution_start";
       toolCallId?: string;
       toolName?: string;
+      arguments?: Record<string, unknown>;
     }
   | {
       type: "tool_execution_end";
@@ -318,9 +320,9 @@ export function createPiAgentRuntimeAdapter(
         ? { resumed_from_transcript_ref: params.resumed_from_transcript_ref }
         : {})
     };
-    const unsubscribe = session.subscribe((event) => {
-      projectPiEvent(params.dependencies, params.now(), manifest, runtime, event);
-    });
+    const unsubscribe = session.subscribe((event) =>
+      projectPiEvent(params.dependencies, params.now(), manifest, runtime, event)
+    );
     activeSessions.set(manifest.id, {
       manifest,
       runtime,
@@ -440,13 +442,13 @@ export function createDefaultPiAgentSessionFactory(): PiAgentSessionFactory {
   };
 }
 
-function projectPiEvent(
+async function projectPiEvent(
   dependencies: PiRuntimeAdapterDependencies,
   occurredAt: string,
   manifest: AgentSessionManifest,
   runtime: PiAgentRuntimeSession,
   event: PiAgentSessionEvent
-): void {
+): Promise<void> {
   if (event.type === "tool_execution_start") {
     if (event.toolName && dependencies.policy) {
       try {
@@ -467,16 +469,53 @@ function projectPiEvent(
       }
     }
 
+    const toolCallId = event.toolCallId ?? `${manifest.id}:tool_call`;
     appendRuntimeEvent(dependencies, {
       manifest,
       occurred_at: occurredAt,
       transcript_ref: runtime.transcript_ref,
       type: "agent.runtime.tool_call_requested",
       payload: {
-        tool_call_id: event.toolCallId,
+        tool_call_id: toolCallId,
         tool_name: event.toolName
       }
     });
+
+    if (dependencies.toolGateway && event.toolName) {
+      try {
+        const result = await dependencies.toolGateway.invoke({
+          call_id: toolCallId,
+          session_id: manifest.id,
+          turn_id: `${manifest.id}:turn:${toolCallId}`,
+          tool_name: event.toolName,
+          arguments: event.arguments ?? {}
+        });
+        appendRuntimeEvent(dependencies, {
+          manifest,
+          occurred_at: occurredAt,
+          transcript_ref: runtime.transcript_ref,
+          type: "agent.runtime.tool_call_completed",
+          payload: {
+            tool_call_id: toolCallId,
+            tool_name: event.toolName,
+            is_error: false,
+            ...gatewayResultRefPayload(result)
+          }
+        });
+      } catch (error) {
+        appendRuntimeEvent(dependencies, {
+          manifest,
+          occurred_at: occurredAt,
+          transcript_ref: runtime.transcript_ref,
+          type: "agent.runtime.tool_call_blocked",
+          payload: {
+            tool_call_id: toolCallId,
+            tool_name: event.toolName,
+            reason: error instanceof Error ? error.message : "agent tool blocked"
+          }
+        });
+      }
+    }
     return;
   }
 
@@ -564,9 +603,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function gatewayResultRefPayload(result: unknown): { result_ref?: string } {
+  if (!isRecord(result)) {
+    return {};
+  }
+  const latestPrice = result.latest_price;
+  if (
+    isRecord(latestPrice) &&
+    typeof latestPrice.raw_ref === "string" &&
+    latestPrice.raw_ref.length > 0
+  ) {
+    return { result_ref: latestPrice.raw_ref };
+  }
+  return {};
+}
+
 class FakePiAgentSession implements PiAgentSessionLike {
   readonly sessionId: string;
-  private readonly listeners = new Set<(event: PiAgentSessionEvent) => void>();
+  private readonly listeners = new Set<
+    (event: PiAgentSessionEvent) => void | Promise<void>
+  >();
 
   constructor(
     sessionId: string,
@@ -575,16 +631,16 @@ class FakePiAgentSession implements PiAgentSessionLike {
     this.sessionId = `fake-pi:${sessionId}`;
   }
 
-  subscribe(listener: (event: PiAgentSessionEvent) => void): () => void {
+  subscribe(
+    listener: (event: PiAgentSessionEvent) => void | Promise<void>
+  ): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
   async prompt(_prompt: string): Promise<void> {
     for (const event of this.events) {
-      for (const listener of this.listeners) {
-        listener(event);
-      }
+      await Promise.all([...this.listeners].map((listener) => listener(event)));
     }
   }
 

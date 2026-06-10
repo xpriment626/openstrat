@@ -213,6 +213,17 @@ export function createAgentToolGateway(
         throw new Error(`tool is not available: ${input.tool_name}`);
       }
 
+      if (input.tool_name === "market_data.read_snapshot") {
+        return gateway.readMarketDataSnapshot({
+          call_id: input.call_id,
+          session_id: input.session_id,
+          turn_id: input.turn_id,
+          canonical_symbol: requiredStringArg(input.arguments, "canonical_symbol"),
+          ...optionalStringArg(input.arguments, "source"),
+          ...optionalStringArg(input.arguments, "venue")
+        });
+      }
+
       throw new Error(
         `direct invocation for ${input.tool_name} requires the typed gateway method`
       );
@@ -249,6 +260,22 @@ function inspectGateMissingRequirements(gate: DeploymentGate): string[] {
 
 function isSupportedTool(toolName: string): toolName is AgentToolGatewayToolName {
   return AGENT_TOOL_GATEWAY_TOOLS.includes(toolName as AgentToolGatewayToolName);
+}
+
+function requiredStringArg(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Missing string argument: ${key}`);
+  }
+  return value;
+}
+
+function optionalStringArg(
+  args: Record<string, unknown>,
+  key: "source" | "venue"
+): Partial<Record<typeof key, string>> {
+  const value = args[key];
+  return typeof value === "string" && value.trim().length > 0 ? { [key]: value } : {};
 }
 
 function recordProposalCaptured(
