@@ -6,9 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "openstrat": "./dist/index.js"
+    "openstrat": "./dist/openstrat"
   },
   "files": [
+    "dist/openstrat",
     "dist/index.js",
     "dist/**/*.d.ts",
     "package.json",

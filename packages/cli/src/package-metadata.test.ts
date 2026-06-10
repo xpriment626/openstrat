@@ -28,10 +28,11 @@ describe("publishable CLI package metadata", () => {
     expect(cliPackage.name).toBe("openstrat");
     expect(cliPackage.private).not.toBe(true);
     expect(cliPackage.bin).toEqual({
-      openstrat: "./dist/index.js"
+      openstrat: "./dist/openstrat"
     });
     expect(cliPackage.files).toEqual(
       expect.arrayContaining([
+        "dist/openstrat",
         "dist/index.js",
         "dist/**/*.d.ts",
         "package.json",
