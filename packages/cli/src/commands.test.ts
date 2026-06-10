@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SqliteEventLog } from "@openstrat/persistence";
 import { runOpenStratCli } from "./commands.js";
 
 describe("openstrat CLI commands", () => {
@@ -427,6 +428,175 @@ describe("openstrat CLI commands", () => {
     expect(blockedPlan.exitCode).toBe(1);
     expect(blockedPlan.stderr.join("\n")).toContain("deployment gate is not ready");
     expect(blockedPlan.stderr.join("\n")).toContain("fee-inclusive backtest required");
+  });
+
+  it("records decision ledger entries and proposes memory from evidence refs", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = { HOME: userHome };
+
+    const ingest = await runOpenStratCli({
+      argv: ["market", "ingest-fixture", "--symbol", "BTC", "--interval", "15m"],
+      cwd,
+      env
+    });
+    const datasetRef = ingest.stdout
+      .find((line) => line.startsWith("dataset: "))
+      ?.replace("dataset: ", "");
+    const backtest = await runOpenStratCli({
+      argv: [
+        "backtest",
+        "run-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef ?? "",
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10"
+      ],
+      cwd,
+      env
+    });
+    const reportRef = backtest.stdout
+      .find((line) => line.startsWith("report: "))
+      ?.replace("report: ", "");
+    const gate = await runOpenStratCli({
+      argv: [
+        "gate",
+        "create-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--risk-policy-ref",
+        "risk/sample",
+        "--ready"
+      ],
+      cwd,
+      env
+    });
+    const gateRef = gate.stdout
+      .find((line) => line.startsWith("gate: "))
+      ?.replace("gate: ", "");
+
+    const decision = await runOpenStratCli({
+      argv: [
+        "ledger",
+        "record-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--gate-ref",
+        gateRef ?? ""
+      ],
+      cwd,
+      env
+    });
+    const decisionRef = decision.stdout
+      .find((line) => line.startsWith("decision: "))
+      ?.replace("decision: ", "");
+    const ledgerList = await runOpenStratCli({
+      argv: ["ledger", "list"],
+      cwd,
+      env
+    });
+
+    expect(decision.exitCode).toBe(0);
+    expect(decisionRef).toContain("decision-ledgers/");
+    expect(ledgerList.stdout.join("\n")).toContain(decisionRef);
+
+    const memory = await runOpenStratCli({
+      argv: [
+        "memory",
+        "propose-sample",
+        "--decision-ref",
+        decisionRef ?? "",
+        "--backtest-report-ref",
+        reportRef ?? "",
+        "--gate-ref",
+        gateRef ?? ""
+      ],
+      cwd,
+      env
+    });
+    const memoryRef = memory.stdout
+      .find((line) => line.startsWith("artifact: "))
+      ?.replace("artifact: ", "");
+    const memoryList = await runOpenStratCli({
+      argv: ["memory", "list"],
+      cwd,
+      env
+    });
+
+    expect(memory.exitCode).toBe(0);
+    expect(memoryRef).toContain("agent-artifacts/");
+    expect(memory.stdout.join("\n")).toContain("status: proposed");
+    expect(memory.stdout.join("\n")).toContain("requires_human_review: yes");
+    expect(memoryList.stdout.join("\n")).toContain(memoryRef);
+
+    const decisionArtifact = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", decisionRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      evidence_refs: string[];
+      strategy_id: string;
+      tags: string[];
+    };
+    const memoryArtifact = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", memoryRef ?? ""),
+        "utf8"
+      )
+    ) as {
+      evidence_refs: string[];
+      promotion_event_ref?: string;
+      requires_human_review: boolean;
+      status: string;
+      subject_id: string;
+      subject_type: string;
+    };
+
+    expect(decisionArtifact).toMatchObject({
+      strategy_id: "sample_moving_average_breakout",
+      tags: expect.arrayContaining(["sample", "e2e-scaffolding"])
+    });
+    expect(decisionArtifact.evidence_refs).toEqual(
+      expect.arrayContaining([datasetRef, reportRef, gateRef])
+    );
+    expect(memoryArtifact).toMatchObject({
+      requires_human_review: true,
+      status: "proposed",
+      subject_id: "sample_moving_average_breakout",
+      subject_type: "strategy"
+    });
+    expect(memoryArtifact.evidence_refs).toEqual(
+      expect.arrayContaining([decisionRef, reportRef, gateRef])
+    );
+    expect(memoryArtifact.promotion_event_ref).toBeUndefined();
+
+    const events = new SqliteEventLog(
+      join(userHome, ".openstrat", "dev-v0", "state.sqlite")
+    );
+    try {
+      const storedEvents = events.list();
+      expect(storedEvents.map((event) => event.type)).toEqual(
+        expect.arrayContaining(["agent.decision.recorded", "agent.proposal.captured"])
+      );
+      expect(
+        storedEvents.find((event) => event.type === "agent.proposal.captured")?.payload
+      ).toMatchObject({
+        tool_name: "memory_proposal.capture"
+      });
+    } finally {
+      events.close();
+    }
   });
 
   it("generates explicit upgrade commands and never self-updates silently", async () => {

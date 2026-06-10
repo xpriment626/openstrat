@@ -22,7 +22,9 @@ import {
 import { runCandleBacktest } from "@openstrat/backtesting";
 import {
   BacktestReportSchema,
+  DecisionLedgerEntrySchema,
   DeploymentGateSchema,
+  MemoryProposalSchema,
   type DeploymentGate
 } from "@openstrat/domain";
 import {
@@ -40,6 +42,7 @@ import {
   type StrategyModule
 } from "@openstrat/strategy-sdk";
 import {
+  type AgentToolGateway,
   createAgentToolGateway,
   type DeploymentGateInspection
 } from "@openstrat/workers";
@@ -185,6 +188,12 @@ export async function runOpenStratCli(
         break;
       case "deploy":
         await commandDeploy({ argv, emitOut, home });
+        break;
+      case "ledger":
+        await commandLedger({ argv, emitOut, home });
+        break;
+      case "memory":
+        await commandMemory({ argv, emitOut, home });
         break;
       case "gateway":
         await commandGateway({ emitOut, home });
@@ -421,6 +430,215 @@ async function commandDeployPlan(options: {
   options.emitOut(`mode: ${loaded.gate.deployment.mode}`);
   options.emitOut(`duration_hours: ${loaded.gate.deployment.duration_hours}`);
   options.emitOut(`max_notional_usd: ${loaded.gate.deployment.max_notional_usd}`);
+}
+
+async function commandLedger(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): Promise<void> {
+  const subcommand = options.argv.shift();
+  switch (subcommand) {
+    case "record-sample":
+      commandLedgerRecordSample(options);
+      return;
+    case "list":
+      commandLedgerList(options);
+      return;
+    default:
+      throw new Error("Usage: openstrat ledger <record-sample|list>");
+  }
+}
+
+function commandLedgerRecordSample(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): void {
+  ensureOpenStratHome(options.home);
+  const strategyRef = requiredFlag(options.argv, "--strategy-ref");
+  const datasetRef = requiredFlag(options.argv, "--dataset-ref");
+  const backtestReportRef = requiredFlag(options.argv, "--backtest-report-ref");
+  const gateRef = requiredFlag(options.argv, "--gate-ref");
+  const store = new FileObjectStore(options.home.objectsDir);
+  const report = BacktestReportSchema.parse(store.getJson(backtestReportRef));
+  const gate = readDeploymentGateRef(store, gateRef).gate;
+  if (report.strategy_id !== strategyRef || gate.strategy_id !== strategyRef) {
+    throw new Error("Decision ledger refs must point at the same strategy");
+  }
+
+  const createdAt = new Date().toISOString();
+  const entry = DecisionLedgerEntrySchema.parse({
+    id: `decision_${Date.now()}_${safeRefSegment(strategyRef)}`,
+    created_at: createdAt,
+    strategy_id: strategyRef,
+    strategy_version: report.strategy_version,
+    run_id: report.run_id,
+    thesis:
+      "Sample strategy has fixture-backed evidence sufficient to continue gated paper deployment planning.",
+    evidence_refs: [datasetRef, backtestReportRef, gateRef],
+    assumptions: [
+      "Fixture market data is only representative for scaffolding.",
+      "Backtest report includes the configured fee and slippage inputs."
+    ],
+    invalidation_conditions: [
+      "Deployment gate becomes not ready.",
+      "Additional backtest evidence contradicts the sample thesis."
+    ],
+    confidence: "low",
+    created_by: {
+      agent_id: "openstrat-cli",
+      model: "sample-fixture",
+      role: "strategy_research_harness"
+    },
+    tags: ["sample", "e2e-scaffolding"]
+  });
+  const decisionRef = `decision-ledgers/${entry.id}.json`;
+  store.putJson(decisionRef, entry);
+
+  const events = new SqliteEventLog(options.home.stateDbPath);
+  try {
+    events.append({
+      stream_id: `decision-ledgers/${strategyRef}`,
+      type: "agent.decision.recorded",
+      occurred_at: createdAt,
+      payload: {
+        decision_id: entry.id,
+        decision_ref: decisionRef,
+        strategy_id: entry.strategy_id,
+        evidence_refs: entry.evidence_refs
+      }
+    });
+  } finally {
+    events.close();
+  }
+
+  options.emitOut(`decision: ${decisionRef}`);
+  options.emitOut(`strategy: ${entry.strategy_id}`);
+  options.emitOut(`evidence_refs: ${entry.evidence_refs.length}`);
+}
+
+function commandLedgerList(options: {
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): void {
+  const store = new FileObjectStore(options.home.objectsDir);
+  const refs = listObjectRefs(options.home, "decision-ledgers");
+  if (refs.length === 0) {
+    options.emitOut("No decision ledger entries found.");
+    return;
+  }
+
+  for (const ref of refs) {
+    const entry = DecisionLedgerEntrySchema.parse(store.getJson(ref));
+    options.emitOut(`${entry.id} ${entry.strategy_id} ${ref}`);
+  }
+}
+
+async function commandMemory(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): Promise<void> {
+  const subcommand = options.argv.shift();
+  switch (subcommand) {
+    case "propose-sample":
+      await commandMemoryProposeSample(options);
+      return;
+    case "list":
+      commandMemoryList(options);
+      return;
+    default:
+      throw new Error("Usage: openstrat memory <propose-sample|list>");
+  }
+}
+
+async function commandMemoryProposeSample(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const decisionRef = requiredFlag(options.argv, "--decision-ref");
+  const backtestReportRef = requiredFlag(options.argv, "--backtest-report-ref");
+  const gateRef = requiredFlag(options.argv, "--gate-ref");
+  const store = new FileObjectStore(options.home.objectsDir);
+  const decision = DecisionLedgerEntrySchema.parse(store.getJson(decisionRef));
+  BacktestReportSchema.parse(store.getJson(backtestReportRef));
+  readDeploymentGateRef(store, gateRef);
+
+  const createdAt = new Date().toISOString();
+  const sessionId = "cli_memory";
+  const turnId = "turn_memory_sample";
+  const proposalId = `memory_proposal_${Date.now()}_${safeRefSegment(
+    decision.strategy_id
+  )}`;
+  const proposal = await withCliAgentToolGateway(options.home, store, (gateway) =>
+    gateway.captureMemoryProposal({
+      call_id: `cli_memory_${proposalId}`,
+      session_id: sessionId,
+      turn_id: turnId,
+      proposal: {
+        id: proposalId,
+        created_at: createdAt,
+        session_id: sessionId,
+        turn_id: turnId,
+        status: "proposed",
+        subject_type: "strategy",
+        subject_id: decision.strategy_id,
+        claim:
+          "Treat this sample decision as evidence-linked scaffolding, not promoted trading memory.",
+        evidence_refs: [decisionRef, backtestReportRef, gateRef],
+        confidence: "low",
+        allowed_uses: ["strategy_review", "research_context"],
+        forbidden_uses: ["auto_promote_to_strategy", "live_trading_without_review"],
+        expiry_or_recheck: "before provider deployment",
+        dissent: [
+          "Two-candle fixture evidence is insufficient for causal performance memory."
+        ],
+        requires_human_review: true,
+        artifact_ref: proposalArtifactRef(sessionId, proposalId, createdAt, {
+          decision_ref: decisionRef,
+          backtest_report_ref: backtestReportRef,
+          gate_ref: gateRef
+        })
+      }
+    })
+  );
+
+  options.emitOut(`proposal: ${proposal.id}`);
+  options.emitOut(`artifact: ${proposal.artifact_ref.uri}`);
+  options.emitOut(`status: ${proposal.status}`);
+  options.emitOut(
+    `requires_human_review: ${proposal.requires_human_review ? "yes" : "no"}`
+  );
+}
+
+function commandMemoryList(options: {
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): void {
+  const store = new FileObjectStore(options.home.objectsDir);
+  const refs = listObjectRefs(options.home, "agent-artifacts");
+  const proposals = refs
+    .map((ref) => ({
+      ref,
+      proposal: MemoryProposalSchema.safeParse(store.getJson(ref))
+    }))
+    .filter((entry) => entry.proposal.success);
+  if (proposals.length === 0) {
+    options.emitOut("No memory proposals found.");
+    return;
+  }
+
+  for (const entry of proposals) {
+    if (entry.proposal.success) {
+      const proposal = entry.proposal.data;
+      options.emitOut(
+        `${proposal.id} ${proposal.subject_type}:${proposal.subject_id} ${proposal.status} ${entry.ref}`
+      );
+    }
+  }
 }
 
 async function commandStrategy(options: {
@@ -864,7 +1082,7 @@ function commandReset(options: {
 function printHelp(emitOut: (line: string) => void): void {
   emitOut("openstrat <command>");
   emitOut(
-    "commands: init, doctor, auth codex, chat, artifacts, market, strategy, backtest, gate, deploy, gateway, upgrade, update, reset --purge"
+    "commands: init, doctor, auth codex, chat, artifacts, market, strategy, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
   );
 }
 
@@ -1046,6 +1264,21 @@ async function inspectGateWithGateway(
   store: FileObjectStore,
   gate: DeploymentGate
 ): Promise<DeploymentGateInspection> {
+  return withCliAgentToolGateway(home, store, (gateway) =>
+    gateway.inspectDeploymentGate({
+      call_id: `cli_gate_inspect_${gate.id}`,
+      session_id: "cli_deployment_gate",
+      turn_id: "turn_gate_inspect",
+      gate
+    })
+  );
+}
+
+async function withCliAgentToolGateway<T>(
+  home: OpenStratHome,
+  store: FileObjectStore,
+  callback: (gateway: AgentToolGateway) => Promise<T>
+): Promise<T> {
   ensureOpenStratHome(home);
   const events = new SqliteEventLog(home.stateDbPath);
   try {
@@ -1073,15 +1306,36 @@ async function inspectGateWithGateway(
       },
       now: () => new Date().toISOString()
     });
-    return gateway.inspectDeploymentGate({
-      call_id: `cli_gate_inspect_${gate.id}`,
-      session_id: "cli_deployment_gate",
-      turn_id: "turn_gate_inspect",
-      gate
-    });
+    return await callback(gateway);
   } finally {
     events.close();
   }
+}
+
+function proposalArtifactRef(
+  sessionId: string,
+  proposalId: string,
+  createdAt: string,
+  metadata: Record<string, unknown>
+) {
+  return {
+    id: `${proposalId}_artifact`,
+    kind: "proposal" as const,
+    uri: `agent-artifacts/${safeRefSegment(sessionId)}/${proposalId}.json`,
+    content_hash: `sha256:${proposalId}`,
+    created_at: createdAt,
+    append_only: true as const,
+    metadata
+  };
+}
+
+function safeRefSegment(value: string): string {
+  return (
+    value
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "ref"
+  );
 }
 
 function listMarketDatasetRefs(home: OpenStratHome): string[] {
@@ -1105,6 +1359,30 @@ function listMarketDatasetRefs(home: OpenStratHome): string[] {
     }
   };
   walk(datasetsRoot, "datasets/hyperliquid");
+  return refs.sort();
+}
+
+function listObjectRefs(home: OpenStratHome, prefix: string): string[] {
+  const root = join(home.objectsDir, ...prefix.split("/"));
+  if (!existsSync(root)) {
+    return [];
+  }
+
+  const refs: string[] = [];
+  const walk = (dir: string, refPrefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const childPath = join(dir, entry.name);
+      const childRef = join(refPrefix, entry.name);
+      if (entry.isDirectory()) {
+        walk(childPath, childRef);
+        continue;
+      }
+      if (entry.isFile() && entry.name.endsWith(".json")) {
+        refs.push(childRef);
+      }
+    }
+  };
+  walk(root, prefix);
   return refs.sort();
 }
 
