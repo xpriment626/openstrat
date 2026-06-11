@@ -16,7 +16,11 @@ import {
   createFakePiAgentSessionFactory,
   createPiAgentRuntimeAdapter,
   createStrategyProposalWorkflow,
+  FakeCodexAppServerRuntimeAdapter,
+  FileCodexAppServerBindingStore,
+  FileCodexAppServerTranscriptStore,
   FilePiTranscriptStore,
+  type CodexAppServerRuntimeEvent,
   type PiAgentSessionFactory
 } from "@openstrat/agent-runtime";
 import { runCandleBacktest } from "@openstrat/backtesting";
@@ -119,6 +123,8 @@ interface DeploymentGateArtifact {
   risk_policy_ref: string;
   inspection: DeploymentGateInspection;
 }
+
+type ChatRuntimeKind = "codex_app_server" | "pi";
 
 export interface RunOpenStratCliInput {
   argv: string[];
@@ -1063,6 +1069,96 @@ async function commandChat(options: {
     throw new Error("No prompt provided");
   }
 
+  const runtimeKind = chatRuntimeFromArgs(options.argv, options.env);
+  if (runtimeKind === "pi") {
+    await commandPiChat(options, prompt);
+    return;
+  }
+  await commandCodexAppServerChat(options, prompt);
+}
+
+async function commandCodexAppServerChat(
+  options: {
+    argv: string[];
+    cwd: string;
+    emitOut: (line: string) => void;
+    env: Record<string, string | undefined>;
+    home: OpenStratHome;
+  },
+  prompt: string
+): Promise<void> {
+  const events = new SqliteEventLog(options.home.stateDbPath);
+  const sessionId = `agent_session_${Date.now()}`;
+  const transcriptStore = new FileCodexAppServerTranscriptStore(options.home.root);
+  const adapter = new FakeCodexAppServerRuntimeAdapter({
+    bindingStore: new FileCodexAppServerBindingStore(options.home.root),
+    events,
+    now: () => new Date().toISOString(),
+    runtimeEvents: fakeCodexChatEvents({
+      finalOnly: options.env.OPENSTRAT_FAKE_CODEX_FINAL_ONLY === "1"
+    }),
+    transcriptStore
+  });
+
+  const createdAt = new Date().toISOString();
+  const runtime = await adapter.startSession({
+    manifest: {
+      id: sessionId,
+      created_at: createdAt,
+      purpose: "strategy_research",
+      autonomy_mode: "strategy_workbench",
+      runtime: {
+        kind: "codex_app_server",
+        adapter: "@openstrat/agent-runtime/codex-app-server",
+        model_profile_id: "model/openai-codex-subscription",
+        provider: "openai-codex",
+        model: "gpt-5.5"
+      },
+      transcript_ref: {
+        id: `artifact_transcript_${sessionId}`,
+        kind: "agent_transcript",
+        uri: join(options.home.sessionsDir, `${sessionId}.jsonl`),
+        content_hash: "sha256:pending",
+        created_at: createdAt,
+        append_only: true
+      },
+      event_stream_id: `agent_sessions/${sessionId}`,
+      tool_grant_ids: [],
+      canonical_ledger_refs: []
+    },
+    toolNames: ["market_data.read_snapshot"]
+  });
+  await adapter.prompt({ session_id: sessionId, prompt });
+  await adapter.dispose(sessionId);
+
+  const stream = events.list(`agent_sessions/${sessionId}`);
+  const deltas = stream
+    .filter((event) => event.type === "agent.runtime.message_delta")
+    .map((event) => (event.payload as { delta?: string }).delta ?? "")
+    .join("");
+  options.emitOut(
+    deltas ||
+      finalAssistantTextFromStream(stream) ||
+      "OpenStrat chat session completed."
+  );
+  options.emitOut("runtime: codex_app_server");
+  options.emitOut(`session: ${sessionId}`);
+  options.emitOut(`codex thread: ${runtime.codex_thread_id}`);
+  options.emitOut(`transcript: ${runtime.transcript_ref}`);
+  options.emitOut(`disabled native tools: ${runtime.disabled_native_tools.join(",")}`);
+  events.close();
+}
+
+async function commandPiChat(
+  options: {
+    argv: string[];
+    cwd: string;
+    emitOut: (line: string) => void;
+    env: Record<string, string | undefined>;
+    home: OpenStratHome;
+  },
+  prompt: string
+): Promise<void> {
   const events = new SqliteEventLog(options.home.stateDbPath);
   const sessionId = `agent_session_${Date.now()}`;
   const transcriptStore = new FilePiTranscriptStore(options.home.root);
@@ -1129,6 +1225,7 @@ async function commandChat(options: {
       finalAssistantTextFromStream(stream) ||
       "OpenStrat chat session completed."
   );
+  options.emitOut("runtime: pi");
   options.emitOut(`session: ${sessionId}`);
   options.emitOut(`transcript: ${runtime.transcript_ref}`);
   options.emitOut(`disabled native tools: ${runtime.disabled_builtin_tools.join(",")}`);
@@ -1198,7 +1295,7 @@ function commandReset(options: {
 function printHelp(emitOut: (line: string) => void): void {
   emitOut("openstrat <command>");
   emitOut(
-    "commands: init, doctor, auth codex, chat, artifacts, market, strategy, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
+    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
   );
 }
 
@@ -1238,6 +1335,23 @@ async function promptFromArgs(argv: string[]): Promise<string> {
     return argv[promptIndex + 1] ?? "";
   }
   return promptLine("openstrat> ");
+}
+
+function chatRuntimeFromArgs(
+  argv: readonly string[],
+  env: Record<string, string | undefined>
+): ChatRuntimeKind {
+  const raw = stringFlag(argv, "--runtime") ?? env.OPENSTRAT_CHAT_RUNTIME ?? "codex";
+  switch (raw) {
+    case "codex":
+    case "codex-app-server":
+    case "codex_app_server":
+      return "codex_app_server";
+    case "pi":
+      return "pi";
+    default:
+      throw new Error(`Unsupported chat runtime: ${raw}`);
+  }
 }
 
 async function promptLine(message: string): Promise<string> {
@@ -1845,6 +1959,27 @@ function fakePiChatEvents(options: { finalOnly: boolean }) {
       willRetry: false
     }
   ] as never;
+}
+
+function fakeCodexChatEvents(options: {
+  finalOnly: boolean;
+}): readonly CodexAppServerRuntimeEvent[] {
+  const text = options.finalOnly
+    ? "Final assistant text from Codex."
+    : "Hello from OpenStrat.";
+  const events: CodexAppServerRuntimeEvent[] = [];
+  if (!options.finalOnly) {
+    events.push({
+      type: "message_delta",
+      delta: text
+    });
+  }
+  events.push({
+    type: "turn_completed",
+    assistant_text: text,
+    message_count: 1
+  });
+  return events;
 }
 
 function fakeUserMessage(text: string) {

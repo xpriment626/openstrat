@@ -11,7 +11,6 @@ describe("openstrat CLI commands", () => {
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
     const env = {
       HOME: userHome,
-      OPENSTRAT_FAKE_PI: "1",
       OPENSTRAT_FAKE_HYPERLIQUID: "1",
       OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
     };
@@ -40,8 +39,10 @@ describe("openstrat CLI commands", () => {
     expect(doctor.stdout.join("\n")).toContain("Codex auth: missing");
     expect(doctor.stdout.join("\n")).not.toContain("access-token");
     expect(chat.stdout.join("\n")).toContain("Hello from OpenStrat");
+    expect(chat.stdout.join("\n")).toContain("runtime: codex_app_server");
+    expect(chat.stdout.join("\n")).toContain("codex thread: codex_thread_");
     expect(chat.stdout.join("\n")).toContain(
-      "disabled native tools: read,bash,edit,write"
+      "disabled native tools: shell,apply_patch,read,write,edit"
     );
     expect(artifacts.stdout.join("\n")).toContain("agent_session_");
     expect(gateway.stdout.join("\n")).toContain("OpenStrat Gateway");
@@ -77,7 +78,7 @@ describe("openstrat CLI commands", () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
     const chat = await runOpenStratCli({
-      argv: ["chat", "--prompt", "hello"],
+      argv: ["chat", "--runtime", "pi", "--prompt", "hello"],
       cwd,
       env: {
         HOME: userHome,
@@ -88,6 +89,24 @@ describe("openstrat CLI commands", () => {
 
     expect(chat.exitCode).toBe(0);
     expect(chat.stdout.join("\n")).toContain("Final assistant text from Pi.");
+    expect(chat.stdout.join("\n")).not.toContain("OpenStrat chat session completed.");
+  });
+
+  it("prints final assistant text when Codex app-server does not stream text deltas", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const chat = await runOpenStratCli({
+      argv: ["chat", "--prompt", "hello"],
+      cwd,
+      env: {
+        HOME: userHome,
+        OPENSTRAT_FAKE_CODEX_FINAL_ONLY: "1"
+      }
+    });
+
+    expect(chat.exitCode).toBe(0);
+    expect(chat.stdout.join("\n")).toContain("Final assistant text from Codex.");
+    expect(chat.stdout.join("\n")).toContain("runtime: codex_app_server");
     expect(chat.stdout.join("\n")).not.toContain("OpenStrat chat session completed.");
   });
 
