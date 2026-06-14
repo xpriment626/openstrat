@@ -20,4 +20,5 @@ export interface HarnessWorker {
 }
 
 export * from "./agent-tool-gateway.js";
+export * from "./agent-tool-registry.js";
 export * from "./deployment.js";

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { agentToolGatewayToolNames } from "@openstrat/workers";
 import {
   createAgentRuntimePolicy,
   createAgentRuntimePolicyEnforcer,
@@ -16,14 +17,7 @@ describe("agent runtime policy enforcement", () => {
       allowed_model_profile_ids: ["model/openai-codex-subscription"]
     });
 
-    expect(policy.allowed_tool_names).toEqual([
-      "market_data.read_snapshot",
-      "backtest.request",
-      "risk.validate_intent",
-      "strategy_patch.capture",
-      "memory_proposal.capture",
-      "deployment_gate.inspect"
-    ]);
+    expect(policy.allowed_tool_names).toEqual(agentToolGatewayToolNames());
     expect(policy.allowed_model_profile_ids).toEqual([
       "model/openai-codex-subscription"
     ]);

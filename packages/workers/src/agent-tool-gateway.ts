@@ -18,17 +18,15 @@ import {
 import type { MarketDataReader } from "@openstrat/market-data";
 import type { EventLogRepository, ObjectStore } from "@openstrat/persistence";
 import type { RiskContext, RiskPolicyEngine } from "@openstrat/risk";
+import {
+  AGENT_TOOL_GATEWAY_TOOLS,
+  agentToolGatewayToolDefinition,
+  isAgentToolGatewayToolName,
+  type AgentToolGatewayToolName
+} from "./agent-tool-registry.js";
 
-export const AGENT_TOOL_GATEWAY_TOOLS = [
-  "market_data.read_snapshot",
-  "backtest.request",
-  "risk.validate_intent",
-  "strategy_patch.capture",
-  "memory_proposal.capture",
-  "deployment_gate.inspect"
-] as const;
-
-export type AgentToolGatewayToolName = (typeof AGENT_TOOL_GATEWAY_TOOLS)[number];
+export { AGENT_TOOL_GATEWAY_TOOLS } from "./agent-tool-registry.js";
+export type { AgentToolGatewayToolName } from "./agent-tool-registry.js";
 
 export interface AgentToolGatewayDependencies {
   events: EventLogRepository;
@@ -126,7 +124,7 @@ export function createAgentToolGateway(
       });
 
       recordToolCompleted(dependencies, now(), input, "market_data.read_snapshot", {
-        side_effect: "none",
+        side_effect: sideEffectFor("market_data.read_snapshot"),
         result_ref: latestPrice.raw_ref ?? market.source_refs[0]
       });
       return { market, latest_price: latestPrice };
@@ -137,7 +135,7 @@ export function createAgentToolGateway(
       writeProposalArtifact(dependencies.objects, request.artifact_ref.uri, request);
       recordProposalCaptured(dependencies, now(), input, "backtest.request", request);
       recordToolCompleted(dependencies, now(), input, "backtest.request", {
-        side_effect: "proposal_written",
+        side_effect: sideEffectFor("backtest.request"),
         result_ref: request.artifact_ref.uri
       });
       return request;
@@ -148,7 +146,7 @@ export function createAgentToolGateway(
       const policy = RiskPolicySchema.parse(input.policy);
       const review = await dependencies.risk.review(intent, policy, input.context);
       recordToolCompleted(dependencies, now(), input, "risk.validate_intent", {
-        side_effect: "event_logged",
+        side_effect: sideEffectFor("risk.validate_intent"),
         result_ref: review.id,
         status: review.status
       });
@@ -166,7 +164,7 @@ export function createAgentToolGateway(
         proposal
       );
       recordToolCompleted(dependencies, now(), input, "strategy_patch.capture", {
-        side_effect: "proposal_written",
+        side_effect: sideEffectFor("strategy_patch.capture"),
         result_ref: proposal.artifact_ref.uri
       });
       return proposal;
@@ -183,7 +181,7 @@ export function createAgentToolGateway(
         proposal
       );
       recordToolCompleted(dependencies, now(), input, "memory_proposal.capture", {
-        side_effect: "proposal_written",
+        side_effect: sideEffectFor("memory_proposal.capture"),
         result_ref: proposal.artifact_ref.uri
       });
       return proposal;
@@ -199,7 +197,7 @@ export function createAgentToolGateway(
         required_reviews: gate.required_reviews
       };
       recordToolCompleted(dependencies, now(), input, "deployment_gate.inspect", {
-        side_effect: "none",
+        side_effect: sideEffectFor("deployment_gate.inspect"),
         result_ref: gate.id,
         ready: inspection.ready
       });
@@ -215,13 +213,16 @@ export function createAgentToolGateway(
       }
 
       if (input.tool_name === "market_data.read_snapshot") {
+        const args = agentToolGatewayToolDefinition(
+          "market_data.read_snapshot"
+        ).input_schema.parse(input.arguments);
         return gateway.readMarketDataSnapshot({
           call_id: input.call_id,
           session_id: input.session_id,
           turn_id: input.turn_id,
-          canonical_symbol: requiredStringArg(input.arguments, "canonical_symbol"),
-          ...optionalStringArg(input.arguments, "source"),
-          ...optionalStringArg(input.arguments, "venue")
+          canonical_symbol: args.canonical_symbol,
+          ...(args.source ? { source: args.source } : {}),
+          ...(args.venue ? { venue: args.venue } : {})
         });
       }
 
@@ -260,23 +261,11 @@ function inspectGateMissingRequirements(gate: DeploymentGate): string[] {
 }
 
 function isSupportedTool(toolName: string): toolName is AgentToolGatewayToolName {
-  return AGENT_TOOL_GATEWAY_TOOLS.includes(toolName as AgentToolGatewayToolName);
+  return isAgentToolGatewayToolName(toolName);
 }
 
-function requiredStringArg(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Missing string argument: ${key}`);
-  }
-  return value;
-}
-
-function optionalStringArg(
-  args: Record<string, unknown>,
-  key: "source" | "venue"
-): Partial<Record<typeof key, string>> {
-  const value = args[key];
-  return typeof value === "string" && value.trim().length > 0 ? { [key]: value } : {};
+function sideEffectFor(toolName: AgentToolGatewayToolName) {
+  return agentToolGatewayToolDefinition(toolName).side_effect;
 }
 
 function recordProposalCaptured(

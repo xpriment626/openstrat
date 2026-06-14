@@ -4,6 +4,7 @@ import {
   NonEmptyStringSchema,
   type AutonomyMode
 } from "@openstrat/domain";
+import { agentToolGatewayToolNames } from "@openstrat/workers";
 
 export const AgentProposalTypeSchema = z.enum([
   "research_brief",
@@ -184,14 +185,7 @@ function defaultsForAutonomyMode(
       };
     case "strategy_workbench":
       return {
-        allowed_tool_names: [
-          "market_data.read_snapshot",
-          "backtest.request",
-          "risk.validate_intent",
-          "strategy_patch.capture",
-          "memory_proposal.capture",
-          "deployment_gate.inspect"
-        ],
+        allowed_tool_names: agentToolGatewayToolNames(),
         max_turns: 12,
         max_runtime_ms: 30 * 60 * 1000,
         allowed_proposal_types: [
@@ -205,14 +199,7 @@ function defaultsForAutonomyMode(
     case "paper_trading":
     case "draft_orders":
       return {
-        allowed_tool_names: [
-          "market_data.read_snapshot",
-          "backtest.request",
-          "risk.validate_intent",
-          "strategy_patch.capture",
-          "memory_proposal.capture",
-          "deployment_gate.inspect"
-        ],
+        allowed_tool_names: agentToolGatewayToolNames(),
         max_turns: 10,
         max_runtime_ms: 20 * 60 * 1000,
         allowed_proposal_types: [
