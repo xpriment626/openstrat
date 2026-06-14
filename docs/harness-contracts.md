@@ -24,3 +24,14 @@ This preserves the product boundary: Codex and Pi can propose trading work, but 
 `FileObjectStore` consumes the domain-level `ObjectRefSchema`. Path safety is therefore a domain contract, not only a filesystem implementation detail.
 
 The object store still rejects accidental overwrites by default. Append-only is the default expectation for generated harness artifacts; explicit overwrite remains limited to fixture and migration-style call sites.
+
+## Goal Artifact Boundary
+
+Long-running Codex goals should leave durable project artifacts instead of relying on chat memory alone.
+
+- `GoalRunManifestSchema`: records the objective, branch, lane list, OpenStrat product boundary, and required final question.
+- `GoalArtifactIndexSchema`: records checkpoint refs, commits, current status, final gate refs, and next-goal recommendation once complete.
+- `GoalFinalGateReportSchema`: records the final gate results, remaining issues, commit trail, and readiness assessment for the next goal.
+- `GoalArtifactRefSchema`: keeps goal artifacts under `goal-runs/` and outside agent proposal storage.
+
+The active Harness Contract Hardening goal writes its manifest and index under `goal-runs/goal-01-harness-contract-hardening/`. Lane checkpoints remain in `checkpoints/` for human review, while the index is the machine-readable bridge for future goal runs.

@@ -1,0 +1,49 @@
+{
+  "id": "goal-01-harness-contract-hardening-index",
+  "goal_id": "goal-01-harness-contract-hardening",
+  "artifact_ref": "goal-runs/goal-01-harness-contract-hardening/index.json",
+  "manifest_ref": "goal-runs/goal-01-harness-contract-hardening/manifest.json",
+  "created_at": "2026-06-14T00:00:00.000Z",
+  "updated_at": "2026-06-14T00:00:00.000Z",
+  "branch": "codex/goal-01-harness-contract-hardening",
+  "status": "running",
+  "checkpoints": [
+    {
+      "lane_id": "lane-1-contract-audit",
+      "status": "completed",
+      "checkpoint_ref": "checkpoints/goal-01-harness-contract-hardening-lane-1-contract-audit.md",
+      "completed_at": "2026-06-14T00:00:00.000Z",
+      "commit": "1c1341b"
+    },
+    {
+      "lane_id": "lane-2-ref-conventions",
+      "status": "completed",
+      "checkpoint_ref": "checkpoints/goal-01-harness-contract-hardening-lane-2-ref-conventions.md",
+      "completed_at": "2026-06-14T00:00:00.000Z",
+      "commit": "5f3903c"
+    },
+    {
+      "lane_id": "lane-3-event-result-envelopes",
+      "status": "completed",
+      "checkpoint_ref": "checkpoints/goal-01-harness-contract-hardening-lane-3-event-result-envelopes.md",
+      "completed_at": "2026-06-14T00:00:00.000Z",
+      "commit": "d8858b8"
+    },
+    {
+      "lane_id": "lane-4-tool-registry-grants",
+      "status": "completed",
+      "checkpoint_ref": "checkpoints/goal-01-harness-contract-hardening-lane-4-tool-registry-grants.md",
+      "completed_at": "2026-06-14T00:00:00.000Z",
+      "commit": "835a76c"
+    },
+    {
+      "lane_id": "lane-5-cli-json-output",
+      "status": "completed",
+      "checkpoint_ref": "checkpoints/goal-01-harness-contract-hardening-lane-5-cli-json-output.md",
+      "completed_at": "2026-06-14T00:00:00.000Z",
+      "commit": "eb3fd8d"
+    }
+  ],
+  "commits": ["1c1341b", "5f3903c", "d8858b8", "835a76c", "eb3fd8d"],
+  "final_gates": []
+}

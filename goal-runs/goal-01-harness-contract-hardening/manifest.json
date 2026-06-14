@@ -1,0 +1,68 @@
+{
+  "id": "goal-01-harness-contract-hardening",
+  "title": "Harness Contract Hardening",
+  "objective": "Make the harness contracts stable enough for Codex, CLI, tests, and future UI panels to consume without scraping human text.",
+  "branch": "codex/goal-01-harness-contract-hardening",
+  "created_at": "2026-06-14T00:00:00.000Z",
+  "status": "running",
+  "product_boundary": "trading_strategy_harness",
+  "lanes": [
+    {
+      "id": "lane-1-contract-audit",
+      "order": 1,
+      "title": "Contract audit",
+      "completion_criteria": [
+        "Audit harness contracts and write a checkpoint covering contract gaps, drift, and the next lane unlocked."
+      ]
+    },
+    {
+      "id": "lane-2-ref-conventions",
+      "order": 2,
+      "title": "Artifact and ref conventions",
+      "completion_criteria": [
+        "Stabilize object refs, proposal refs, and canonical refs so generated work cannot silently mutate canonical harness state."
+      ]
+    },
+    {
+      "id": "lane-3-event-result-envelopes",
+      "order": 3,
+      "title": "Event and result envelopes",
+      "completion_criteria": [
+        "Standardize runtime metadata, tool lifecycle payloads, and completed, blocked, and failed result envelopes."
+      ]
+    },
+    {
+      "id": "lane-4-tool-registry-grants",
+      "order": 4,
+      "title": "Tool schema and grants",
+      "completion_criteria": [
+        "Centralize gateway tool names, validation, side effects, and grant requirements."
+      ]
+    },
+    {
+      "id": "lane-5-cli-json-output",
+      "order": 5,
+      "title": "CLI JSON output",
+      "completion_criteria": [
+        "Add a machine-readable CLI output mode using completed, blocked, and failed result envelopes."
+      ]
+    },
+    {
+      "id": "lane-6-goal-artifacts",
+      "order": 6,
+      "title": "Goal artifacts",
+      "completion_criteria": [
+        "Add durable goal manifest, checkpoint index, and final-report artifact contracts."
+      ]
+    },
+    {
+      "id": "lane-7-docs-final-gates",
+      "order": 7,
+      "title": "Docs and final gates",
+      "completion_criteria": [
+        "Update docs, run final gates, write the final report, and recommend the next goal with readiness."
+      ]
+    }
+  ],
+  "final_question": "Given what changed during this goal, is the next planned goal still correct?"
+}
