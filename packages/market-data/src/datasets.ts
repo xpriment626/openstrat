@@ -33,6 +33,26 @@ export interface MarketDatasetIndexQuery extends MarketDatasetIndexRefInput {
   families?: readonly MarketDataRecordFamily[];
 }
 
+export interface MarketDatasetValidationOptions {
+  as_of?: string;
+  canonical_symbol?: string;
+  source?: string;
+  venue?: string;
+  required_families?: readonly MarketDataRecordFamily[];
+  require_object_refs?: boolean;
+}
+
+export interface MarketDatasetValidationResult {
+  dataset_ref: string;
+  canonical_symbol: string;
+  source: string;
+  venue: string;
+  families: readonly MarketDataRecordFamily[];
+  freshness: MarketDatasetManifest["freshness"];
+  valid: boolean;
+  missing_requirements: string[];
+}
+
 export function rawMarketDataObjectRef(input: MarketDataObjectRefInput): string {
   return marketDataObjectRef("raw", input);
 }
@@ -135,6 +155,81 @@ export function listMarketDatasetIndexEntries(
   );
 }
 
+export function validateMarketDataset(
+  store: ObjectStore,
+  datasetRef: string,
+  options: MarketDatasetValidationOptions = {}
+): MarketDatasetValidationResult {
+  const manifest = getMarketDatasetManifest(store, datasetRef);
+  const missingRequirements: string[] = [];
+  const requiredFamilies = options.required_families ?? [];
+  const requireObjectRefs = options.require_object_refs ?? true;
+
+  if (
+    options.canonical_symbol &&
+    manifest.canonical_symbol !== options.canonical_symbol
+  ) {
+    missingRequirements.push(
+      `canonical_symbol mismatch: expected ${options.canonical_symbol}, got ${manifest.canonical_symbol}`
+    );
+  }
+  if (options.source && manifest.source !== options.source) {
+    missingRequirements.push(
+      `source mismatch: expected ${options.source}, got ${manifest.source}`
+    );
+  }
+  if (options.venue && manifest.venue !== options.venue) {
+    missingRequirements.push(
+      `venue mismatch: expected ${options.venue}, got ${manifest.venue}`
+    );
+  }
+
+  for (const family of requiredFamilies) {
+    if (!manifest.coverage.families.includes(family)) {
+      missingRequirements.push(`missing family: ${family}`);
+    }
+  }
+
+  if (options.as_of && isMarketDatasetStale(manifest, options.as_of)) {
+    missingRequirements.push(
+      `freshness stale: as_of ${manifest.freshness.as_of} + ${manifest.freshness.stale_after_ms}ms is before ${options.as_of}`
+    );
+  }
+  if (
+    options.as_of &&
+    manifest.freshness.expires_at &&
+    Date.parse(manifest.freshness.expires_at) < Date.parse(options.as_of)
+  ) {
+    missingRequirements.push(
+      `freshness expired: expires_at ${manifest.freshness.expires_at} is before ${options.as_of}`
+    );
+  }
+
+  if (requireObjectRefs) {
+    for (const rawRef of manifest.raw_refs) {
+      if (!store.exists(rawRef.ref)) {
+        missingRequirements.push(`missing raw object: ${rawRef.ref}`);
+      }
+    }
+    for (const normalizedRef of manifest.normalized_refs) {
+      if (!store.exists(normalizedRef.ref)) {
+        missingRequirements.push(`missing normalized object: ${normalizedRef.ref}`);
+      }
+    }
+  }
+
+  return {
+    dataset_ref: manifest.dataset_ref,
+    canonical_symbol: manifest.canonical_symbol,
+    source: manifest.source,
+    venue: manifest.venue,
+    families: manifest.coverage.families,
+    freshness: manifest.freshness,
+    valid: missingRequirements.length === 0,
+    missing_requirements: missingRequirements
+  };
+}
+
 function marketDataObjectRef(
   prefix: "normalized" | "raw",
   input: MarketDataObjectRefInput
@@ -178,6 +273,12 @@ function matchesMarketDatasetIndexQuery(
     return false;
   }
   return true;
+}
+
+function isMarketDatasetStale(manifest: MarketDatasetManifest, asOf: string): boolean {
+  const staleAt =
+    Date.parse(manifest.freshness.as_of) + manifest.freshness.stale_after_ms;
+  return staleAt < Date.parse(asOf);
 }
 
 function timeRangesOverlap(

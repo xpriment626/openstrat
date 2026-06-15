@@ -16,6 +16,7 @@ import {
   normalizedMarketDataObjectRef,
   putMarketDatasetManifest,
   rawMarketDataObjectRef,
+  validateMarketDataset,
   writeMarketDatasetIndexEntry,
   writeMarketDatasetManifestAndIndex
 } from "./datasets.js";
@@ -185,5 +186,118 @@ describe("market dataset storage layout", () => {
     expect(() => writeMarketDatasetManifestAndIndex(store, manifest)).toThrow(
       "Object already exists"
     );
+  });
+
+  it("loads and validates a reproducible dataset from its index entry", () => {
+    const manifest = sampleManifest();
+    store.putJson(manifest.raw_refs[0]?.ref ?? "", { raw: true });
+    store.putJson(manifest.normalized_refs[0]?.ref ?? "", [{ close: 100 }]);
+    const entry = writeMarketDatasetManifestAndIndex(store, manifest);
+
+    const [listed] = listMarketDatasetIndexEntries(store, {
+      canonical_symbol: "BTC-PERP",
+      source: "hyperliquid",
+      venue: "hyperliquid",
+      families: ["candles"]
+    });
+    const loaded = getMarketDatasetManifest(store, listed?.dataset_ref ?? "");
+    const validation = validateMarketDataset(store, entry.dataset_ref, {
+      as_of: "2026-06-04T00:00:04.000Z",
+      canonical_symbol: "BTC-PERP",
+      source: "hyperliquid",
+      venue: "hyperliquid",
+      required_families: ["candles"]
+    });
+
+    expect(loaded).toMatchObject({ dataset_ref: manifest.dataset_ref });
+    expect(validation).toMatchObject({
+      dataset_ref: manifest.dataset_ref,
+      valid: true,
+      missing_requirements: [],
+      families: ["candles"],
+      freshness: manifest.freshness
+    });
+  });
+
+  it("rejects stale datasets", () => {
+    const manifest = sampleManifest();
+    store.putJson(manifest.raw_refs[0]?.ref ?? "", { raw: true });
+    store.putJson(manifest.normalized_refs[0]?.ref ?? "", [{ close: 100 }]);
+    writeMarketDatasetManifestAndIndex(store, manifest);
+
+    expect(
+      validateMarketDataset(store, manifest.dataset_ref, {
+        as_of: "2026-06-04T00:00:06.000Z",
+        required_families: ["candles"]
+      })
+    ).toMatchObject({
+      valid: false,
+      missing_requirements: [
+        "freshness stale: as_of 2026-06-04T00:00:00.000Z + 5000ms is before 2026-06-04T00:00:06.000Z"
+      ]
+    });
+  });
+
+  it("rejects incomplete datasets with missing raw, normalized, or family coverage", () => {
+    const manifest = MarketDatasetManifestSchema.parse({
+      ...sampleManifest(),
+      coverage: {
+        families: ["candles", "funding_rates"],
+        candle_intervals: ["15m"]
+      },
+      normalized_refs: [
+        ...sampleManifest().normalized_refs,
+        {
+          ref: "normalized/hyperliquid/funding/BTC/1681923600000-1681927200000.json",
+          family: "funding_rates",
+          canonical_symbol: "BTC-PERP",
+          source: "hyperliquid",
+          venue: "hyperliquid",
+          created_at: receivedAt,
+          raw_refs: [
+            "raw/hyperliquid/candles/BTC/15m/1681923600000-1681927200000.json"
+          ],
+          immutable: true
+        }
+      ]
+    });
+    store.putJson(manifest.raw_refs[0]?.ref ?? "", { raw: true });
+    writeMarketDatasetManifestAndIndex(store, manifest);
+
+    expect(
+      validateMarketDataset(store, manifest.dataset_ref, {
+        as_of: "2026-06-04T00:00:04.000Z",
+        required_families: ["candles", "funding_rates", "orderbook_snapshots"]
+      })
+    ).toMatchObject({
+      valid: false,
+      missing_requirements: [
+        "missing family: orderbook_snapshots",
+        "missing normalized object: normalized/hyperliquid/candles/BTC/15m/1681923600000-1681927200000.json",
+        "missing normalized object: normalized/hyperliquid/funding/BTC/1681923600000-1681927200000.json"
+      ]
+    });
+  });
+
+  it("rejects datasets that are incompatible with the requested identity", () => {
+    const manifest = sampleManifest();
+    store.putJson(manifest.raw_refs[0]?.ref ?? "", { raw: true });
+    store.putJson(manifest.normalized_refs[0]?.ref ?? "", [{ close: 100 }]);
+    writeMarketDatasetManifestAndIndex(store, manifest);
+
+    expect(
+      validateMarketDataset(store, manifest.dataset_ref, {
+        canonical_symbol: "ETH-PERP",
+        source: "coinbase",
+        venue: "hyperliquid",
+        required_families: ["candles"]
+      })
+    ).toMatchObject({
+      valid: false,
+      missing_requirements: [
+        "canonical_symbol mismatch: expected ETH-PERP, got BTC-PERP",
+        "source mismatch: expected coinbase, got hyperliquid"
+      ]
+    });
   });
 });

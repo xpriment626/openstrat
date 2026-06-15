@@ -22,6 +22,7 @@ import {
   normalizeHyperliquidL2Book,
   normalizeHyperliquidMetaAndAssetCtxs
 } from "./index.js";
+import { validateMarketDataset } from "../datasets.js";
 
 const receivedAt = "2026-06-04T00:00:00.000Z";
 
@@ -280,5 +281,30 @@ describe("Hyperliquid registry and historical ingest", () => {
         acquisition_method: "fixture"
       })
     ]);
+    expect(
+      validateMarketDataset(store, result.dataset_ref, {
+        as_of: "2026-06-04T00:00:04.000Z",
+        canonical_symbol: "BTC-PERP",
+        source: "hyperliquid",
+        venue: "hyperliquid",
+        required_families: [
+          "market_registry",
+          "mark_prices",
+          "candles",
+          "funding_rates",
+          "orderbook_snapshots"
+        ]
+      })
+    ).toMatchObject({
+      valid: true,
+      missing_requirements: [],
+      families: [
+        "market_registry",
+        "mark_prices",
+        "candles",
+        "funding_rates",
+        "orderbook_snapshots"
+      ]
+    });
   });
 });
