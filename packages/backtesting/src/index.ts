@@ -1,11 +1,19 @@
 import {
   BacktestReportSchema,
+  MarketDatasetManifestSchema,
   type BacktestReport,
   type BacktestRun,
   type Candle,
+  type MarketDataRecordFamily,
+  type MarketDatasetManifest,
+  type StrategyDataRequirement,
   type StrategyManifest,
   type TradeIntent
 } from "@openstrat/domain";
+import {
+  validateMarketDataset,
+  type MarketDatasetValidationResult
+} from "@openstrat/market-data";
 import type { ObjectStore } from "@openstrat/persistence";
 import {
   createStrategyRunner,
@@ -59,6 +67,22 @@ export interface CandleBacktestRequest {
   risk_policy_ref?: string;
 }
 
+export interface StrategyDatasetCompatibilityPreflightInput {
+  object_store: ObjectStore;
+  strategy: StrategyManifest;
+  dataset_ref: string;
+  as_of?: string;
+  source?: string;
+  venue?: string;
+  require_object_refs?: boolean;
+}
+
+export interface StrategyDatasetCompatibilityPreflightResult {
+  manifest: MarketDatasetManifest;
+  validation: MarketDatasetValidationResult;
+  required_families: MarketDataRecordFamily[];
+}
+
 export interface BacktestTradeLedgerEntry {
   id: string;
   canonical_symbol: string;
@@ -89,6 +113,52 @@ interface OpenPosition {
   fees_usd: number;
   slippage_usd: number;
   source_refs: string[];
+}
+
+export function preflightStrategyDatasetCompatibility(
+  input: StrategyDatasetCompatibilityPreflightInput
+): StrategyDatasetCompatibilityPreflightResult {
+  const manifest = MarketDatasetManifestSchema.parse(
+    input.object_store.getJson(input.dataset_ref)
+  );
+  let requiredFamilies: MarketDataRecordFamily[];
+  try {
+    requiredFamilies = requiredFamiliesForStrategy(input.strategy.required_data);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Strategy dataset preflight failed for ${input.dataset_ref}: ${message}`,
+      { cause: error }
+    );
+  }
+  const expectedCanonicalSymbol = expectedDatasetCanonicalSymbol(input.strategy);
+  const validation = validateMarketDataset(input.object_store, input.dataset_ref, {
+    ...(input.as_of ? { as_of: input.as_of } : {}),
+    ...(expectedCanonicalSymbol ? { canonical_symbol: expectedCanonicalSymbol } : {}),
+    ...(input.source ? { source: input.source } : {}),
+    ...(input.venue ? { venue: input.venue } : {}),
+    required_families: requiredFamilies,
+    require_object_refs: input.require_object_refs ?? true
+  });
+  const missingRequirements = [
+    ...validation.missing_requirements,
+    ...strategyDatasetMissingRequirements(input.strategy, manifest)
+  ];
+  if (missingRequirements.length > 0) {
+    throw new Error(
+      `Strategy dataset preflight failed for ${input.dataset_ref}: ${missingRequirements.join("; ")}`
+    );
+  }
+
+  return {
+    manifest,
+    required_families: requiredFamilies,
+    validation: {
+      ...validation,
+      valid: true,
+      missing_requirements: []
+    }
+  };
 }
 
 export async function runCandleBacktest(
@@ -236,6 +306,81 @@ export async function runCandleBacktest(
     artifact_refs: uniqueRefs([tradeLedgerRef, ...artifactRefs]),
     warnings: openPositions.size > 0 ? ["Backtest ended with open positions"] : []
   });
+}
+
+function requiredFamiliesForStrategy(
+  requirements: readonly StrategyDataRequirement[]
+): MarketDataRecordFamily[] {
+  const families = new Set<MarketDataRecordFamily>();
+  for (const requirement of requirements) {
+    families.add(familyForStrategyRequirement(requirement));
+  }
+  return [...families];
+}
+
+function familyForStrategyRequirement(
+  requirement: StrategyDataRequirement
+): MarketDataRecordFamily {
+  switch (requirement.kind) {
+    case "candles":
+      return "candles";
+    case "funding_rates":
+      return "funding_rates";
+    case "orderbook_snapshots":
+      return "orderbook_snapshots";
+    default:
+      throw new Error(`unsupported strategy data requirement: ${requirement.kind}`);
+  }
+}
+
+function expectedDatasetCanonicalSymbol(
+  strategy: StrategyManifest
+): string | undefined {
+  const requiredSymbols = uniqueRefs(
+    strategy.required_data
+      .map((requirement) => requirement.canonical_symbol)
+      .filter((symbol): symbol is string => symbol !== undefined)
+  );
+  return requiredSymbols[0] ?? strategy.allowed_symbols[0];
+}
+
+function strategyDatasetMissingRequirements(
+  strategy: StrategyManifest,
+  manifest: MarketDatasetManifest
+): string[] {
+  const missingRequirements: string[] = [];
+  if (!strategy.allowed_symbols.includes(manifest.canonical_symbol)) {
+    missingRequirements.push(
+      `dataset canonical_symbol ${manifest.canonical_symbol} is not allowed by strategy allowed_symbols: ${strategy.allowed_symbols.join(", ")}`
+    );
+  }
+
+  for (const requirement of strategy.required_data) {
+    if (
+      requirement.canonical_symbol &&
+      requirement.canonical_symbol !== manifest.canonical_symbol
+    ) {
+      missingRequirements.push(
+        `required_data ${requirement.kind} canonical_symbol mismatch: expected ${requirement.canonical_symbol}, got ${manifest.canonical_symbol}`
+      );
+    }
+    if (requirement.source && requirement.source !== manifest.source) {
+      missingRequirements.push(
+        `required_data ${requirement.kind} source mismatch: expected ${requirement.source}, got ${manifest.source}`
+      );
+    }
+    if (
+      requirement.kind === "candles" &&
+      requirement.interval &&
+      !manifest.coverage.candle_intervals.some(
+        (interval) => interval === requirement.interval
+      )
+    ) {
+      missingRequirements.push(`missing candle interval: ${requirement.interval}`);
+    }
+  }
+
+  return missingRequirements;
 }
 
 function isOpenIntent(intent: TradeIntent): boolean {

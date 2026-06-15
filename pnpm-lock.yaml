@@ -38,6 +38,9 @@ importers:
       '@openstrat/domain':
         specifier: workspace:*
         version: link:../domain
+      '@openstrat/market-data':
+        specifier: workspace:*
+        version: link:../market-data
       '@openstrat/persistence':
         specifier: workspace:*
         version: link:../persistence

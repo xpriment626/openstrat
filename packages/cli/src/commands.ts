@@ -23,7 +23,10 @@ import {
   type CodexAppServerRuntimeEvent,
   type PiAgentSessionFactory
 } from "@openstrat/agent-runtime";
-import { runCandleBacktest } from "@openstrat/backtesting";
+import {
+  preflightStrategyDatasetCompatibility,
+  runCandleBacktest
+} from "@openstrat/backtesting";
 import {
   AgentResultEnvelopeSchema,
   BacktestReportSchema,
@@ -429,8 +432,16 @@ async function commandBacktestRunSample(options: {
   const datasetRef = requiredFlag(options.argv, "--dataset-ref");
   const feeBps = numberFlag(options.argv, "--fee-bps");
   const slippageBps = numberFlag(options.argv, "--slippage-bps");
+  const asOf = stringFlag(options.argv, "--as-of");
   const store = new FileObjectStore(options.home.objectsDir);
-  const dataset = getMarketDatasetManifest(store, datasetRef);
+  const dataset = preflightStrategyDatasetCompatibility({
+    object_store: store,
+    strategy: movingAverageBreakoutStrategy.manifest,
+    dataset_ref: datasetRef,
+    ...(asOf ? { as_of: asOf } : {}),
+    source: "hyperliquid",
+    venue: "hyperliquid"
+  }).manifest;
   const runId = `sample_backtest_${Date.now()}`;
   const report = await runCandleBacktest({
     run_id: runId,

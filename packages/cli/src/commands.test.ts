@@ -555,6 +555,94 @@ describe("openstrat CLI commands", () => {
     expect(Array.isArray(ledger)).toBe(true);
   });
 
+  it("rejects sample backtests when the dataset is incompatible with the strategy", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = { HOME: userHome, OPENSTRAT_FAKE_HYPERLIQUID: "1" };
+
+    const ingest = await runOpenStratCli({
+      argv: [
+        "market",
+        "ingest-live",
+        "--symbol",
+        "HYPE-PERP",
+        "--interval",
+        "15m",
+        "--start-time-ms",
+        "1681923600000",
+        "--end-time-ms",
+        "1681927200000",
+        "--received-at",
+        "2026-06-04T00:15:00.000Z",
+        "--confirm-live"
+      ],
+      cwd,
+      env
+    });
+    const datasetRef = lineValue(ingest.stdout, "dataset: ");
+
+    const backtest = await runOpenStratCli({
+      argv: [
+        "backtest",
+        "run-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef,
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10"
+      ],
+      cwd,
+      env
+    });
+
+    expect(backtest.exitCode).toBe(1);
+    expect(backtest.stderr.join("\n")).toContain(
+      `Strategy dataset preflight failed for ${datasetRef}`
+    );
+    expect(backtest.stderr.join("\n")).toContain("canonical_symbol mismatch");
+  });
+
+  it("rejects sample backtests when the dataset is stale for the requested context", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = { HOME: userHome };
+
+    const ingest = await runOpenStratCli({
+      argv: ["market", "ingest-fixture", "--symbol", "BTC", "--interval", "15m"],
+      cwd,
+      env
+    });
+    const datasetRef = lineValue(ingest.stdout, "dataset: ");
+
+    const backtest = await runOpenStratCli({
+      argv: [
+        "backtest",
+        "run-sample",
+        "--strategy-ref",
+        "sample_moving_average_breakout",
+        "--dataset-ref",
+        datasetRef,
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10",
+        "--as-of",
+        "2026-06-04T00:01:00.000Z"
+      ],
+      cwd,
+      env
+    });
+
+    expect(backtest.exitCode).toBe(1);
+    expect(backtest.stderr.join("\n")).toContain(
+      `Strategy dataset preflight failed for ${datasetRef}`
+    );
+    expect(backtest.stderr.join("\n")).toContain("freshness stale");
+  });
+
   it("materializes deployment gates and blocks plans when requirements are missing", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
