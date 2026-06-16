@@ -39,6 +39,7 @@ import {
   MemoryProposalSchema,
   StrategyManifestSchema,
   type AgentResultEnvelope,
+  type BacktestReport,
   type BotRunManifest,
   type DeploymentGate,
   type MarketDatasetManifest,
@@ -142,6 +143,83 @@ interface StrategyValidationArtifact {
   };
 }
 
+interface LocalBacktestRequestArtifact {
+  request_ref: string;
+  created_at: string;
+  generated_at: string;
+  project: {
+    id: string;
+    cwd: string;
+    registration_ref: string;
+    object_root: string;
+  };
+  strategy: StrategyManifest;
+  strategy_manifest_ref: string;
+  strategy_source_ref: string;
+  manifest_path?: string;
+  source_path?: string;
+  dataset_ref: string;
+  validation_ref?: string;
+  fee_model_ref: string;
+  slippage_model_ref: string;
+  command_inputs: Record<string, unknown>;
+  reproducibility: {
+    engine: "@openstrat/backtesting";
+    cli_version: string;
+    deterministic: boolean;
+    as_of?: string;
+  };
+}
+
+interface BacktestMetricsArtifact {
+  metrics_ref: string;
+  created_at: string;
+  backtest_report_ref: string;
+  trade_ledger_ref: string;
+  metrics: Record<string, unknown>;
+}
+
+interface ProjectStatusSnapshot {
+  command: "project";
+  subcommand: "status";
+  generated_at: string;
+  home: {
+    root: string;
+    objects_dir: string;
+    sessions_dir: string;
+  };
+  project: {
+    id: string;
+    cwd: string;
+    registration_ref: string;
+    object_root: string;
+  };
+  latest: {
+    strategy_manifest_path?: string;
+    strategy_source_path?: string;
+    dataset_ref?: string;
+    strategy_validation_ref?: string;
+    backtest_request_ref?: string;
+    backtest_report_ref?: string;
+    backtest_metrics_ref?: string;
+    trade_ledger_ref?: string;
+    gate_ref?: string;
+    gate_artifact_ref?: string;
+    transcript_ref?: string;
+    chat_session_id?: string;
+    export_manifest_path?: string;
+  };
+  counts: {
+    datasets: number;
+    validations: number;
+    backtests: number;
+    gates: number;
+    chat_sessions: number;
+    exports: number;
+  };
+  status_ref: string;
+}
+
 type ChatRuntimeKind = "codex_app_server" | "pi";
 type CliJsonData = Record<string, unknown>;
 type SetCliJsonData = (data: CliJsonData) => void;
@@ -238,10 +316,16 @@ export async function runOpenStratCli(
         await commandStrategy({ argv, cwd, emitOut, home, setJsonData });
         break;
       case "backtest":
-        await commandBacktest({ argv, emitOut, home });
+        await commandBacktest({ argv, cwd, emitOut, home, setJsonData });
         break;
       case "gate":
-        await commandGate({ argv, emitOut, home });
+        await commandGate({ argv, cwd, emitOut, home });
+        break;
+      case "project":
+        await commandProject({ argv, cwd, emitOut, home, setJsonData });
+        break;
+      case "bundle":
+        await commandBundle({ argv, cwd, emitOut, home, setJsonData });
         break;
       case "deploy":
         await commandDeploy({ argv, cwd, emitOut, home });
@@ -437,17 +521,171 @@ async function commandInit(options: {
 
 async function commandBacktest(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
   home: OpenStratHome;
+  setJsonData: SetCliJsonData;
 }): Promise<void> {
   const subcommand = options.argv.shift();
   switch (subcommand) {
+    case "run":
+      await commandBacktestRunLocal(options);
+      return;
     case "run-sample":
       await commandBacktestRunSample(options);
       return;
     default:
-      throw new Error("Usage: openstrat backtest run-sample");
+      throw new Error("Usage: openstrat backtest <run|run-sample>");
   }
+}
+
+async function commandBacktestRunLocal(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const registration = registerProject(options.home, options.cwd);
+  const store = new FileObjectStore(options.home.objectsDir);
+  const loadedStrategy = await loadLocalStrategy(
+    options.cwd,
+    stringFlag(options.argv, "--manifest") ?? "openstrat.strategy.json"
+  );
+  const strategy = loadedStrategy.strategy;
+  const datasetRef = requiredFlag(options.argv, "--dataset-ref");
+  const feeBps = numberFlag(options.argv, "--fee-bps");
+  const slippageBps = numberFlag(options.argv, "--slippage-bps");
+  const asOf = stringFlag(options.argv, "--as-of");
+  const validationRef =
+    stringFlag(options.argv, "--validation-ref") ??
+    latestStrategyValidationRef(
+      options.home,
+      projectObjectRoot(registration),
+      strategy.manifest.strategy_id,
+      datasetRef
+    );
+  const dataset = preflightStrategyDatasetCompatibility({
+    object_store: store,
+    strategy: strategy.manifest,
+    dataset_ref: datasetRef,
+    ...(asOf ? { as_of: asOf } : {})
+  }).manifest;
+
+  const createdAt = new Date().toISOString();
+  const runId = `local_backtest_${Date.now()}_${safeRefSegment(
+    strategy.manifest.strategy_id
+  )}`;
+  const backtestRoot = projectObjectRef(registration, "backtests", runId);
+  const requestRef = `${backtestRoot}/request.json`;
+  const reportRef = `${backtestRoot}/report.json`;
+  const metricsRef = `${backtestRoot}/metrics.json`;
+  const strategyRefs = writeLocalStrategyObjectRefs({
+    createdAt,
+    loadedStrategy,
+    registration,
+    store
+  });
+  const requestArtifact: LocalBacktestRequestArtifact = {
+    request_ref: requestRef,
+    created_at: createdAt,
+    generated_at: createdAt,
+    project: {
+      id: registration.id,
+      cwd: registration.cwd,
+      registration_ref: registration.ref,
+      object_root: projectObjectRoot(registration)
+    },
+    strategy: strategy.manifest,
+    strategy_manifest_ref: strategyRefs.manifest_ref,
+    strategy_source_ref: strategyRefs.source_ref,
+    ...(loadedStrategy.manifest_path
+      ? { manifest_path: loadedStrategy.manifest_path }
+      : {}),
+    ...(loadedStrategy.source_path ? { source_path: loadedStrategy.source_path } : {}),
+    dataset_ref: dataset.dataset_ref,
+    ...(validationRef ? { validation_ref: validationRef } : {}),
+    fee_model_ref: `fees/fixed/${feeBps}bps`,
+    slippage_model_ref: `slippage/fixed/${slippageBps}bps`,
+    command_inputs: {
+      manifest: stringFlag(options.argv, "--manifest") ?? "openstrat.strategy.json",
+      dataset_ref: datasetRef,
+      fee_bps: feeBps,
+      slippage_bps: slippageBps,
+      ...(asOf ? { as_of: asOf } : {}),
+      ...(validationRef ? { validation_ref: validationRef } : {})
+    },
+    reproducibility: {
+      engine: "@openstrat/backtesting",
+      cli_version: cliVersion,
+      deterministic: true,
+      ...(asOf ? { as_of: asOf } : {})
+    }
+  };
+  store.putJson(requestRef, requestArtifact);
+
+  const report = await runCandleBacktest({
+    run_id: runId,
+    strategy,
+    object_store: store,
+    artifact_ref_root: backtestRoot,
+    dataset_ref: dataset.dataset_ref,
+    candle_refs: normalizedRefsFor(dataset, "candles").map((ref) => ref.ref),
+    raw_artifact_refs: dataset.raw_refs.map((rawRef) => rawRef.ref),
+    generated_at: createdAt,
+    initial_equity_usd: 10_000,
+    fee_bps: feeBps,
+    slippage_model: () => ({
+      slippage_bps: slippageBps,
+      source_ref: `slippage/fixed/${slippageBps}bps`
+    }),
+    mode: "paper",
+    risk_policy_ref: "risk/local"
+  });
+  const reportWithEvidence = BacktestReportSchema.parse({
+    ...report,
+    artifact_refs: uniqueRefs([
+      requestRef,
+      metricsRef,
+      strategyRefs.manifest_ref,
+      strategyRefs.source_ref,
+      ...(validationRef ? [validationRef] : []),
+      ...report.artifact_refs
+    ])
+  });
+  const metricsArtifact: BacktestMetricsArtifact = {
+    metrics_ref: metricsRef,
+    created_at: createdAt,
+    backtest_report_ref: reportRef,
+    trade_ledger_ref: reportWithEvidence.trade_ledger_ref,
+    metrics: reportWithEvidence.metrics
+  };
+  store.putJson(metricsRef, metricsArtifact);
+  store.putJson(reportRef, reportWithEvidence);
+
+  options.setJsonData({
+    command: "backtest",
+    subcommand: "run",
+    project_id: registration.id,
+    project_object_root: projectObjectRoot(registration),
+    request_ref: requestRef,
+    report_ref: reportRef,
+    trade_ledger_ref: reportWithEvidence.trade_ledger_ref,
+    metrics_ref: metricsRef,
+    strategy_manifest_ref: strategyRefs.manifest_ref,
+    strategy_source_ref: strategyRefs.source_ref,
+    ...(validationRef ? { validation_ref: validationRef } : {}),
+    trades: reportWithEvidence.metrics.trades
+  });
+
+  options.emitOut(`request: ${requestRef}`);
+  options.emitOut(`report: ${reportRef}`);
+  options.emitOut(`trade_ledger: ${reportWithEvidence.trade_ledger_ref}`);
+  options.emitOut(`metrics: ${metricsRef}`);
+  options.emitOut(`trades: ${reportWithEvidence.metrics.trades}`);
+  options.emitOut(`project: ${registration.id}`);
+  options.emitOut(`project_objects: ${projectObjectRoot(registration)}`);
 }
 
 async function commandBacktestRunSample(options: {
@@ -500,6 +738,7 @@ async function commandBacktestRunSample(options: {
 
 async function commandGate(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
   home: OpenStratHome;
 }): Promise<void> {
@@ -511,8 +750,11 @@ async function commandGate(options: {
     case "inspect":
       await commandGateInspect(options);
       return;
+    case "create-local":
+      await commandGateCreateLocal(options);
+      return;
     default:
-      throw new Error("Usage: openstrat gate <create-sample|inspect>");
+      throw new Error("Usage: openstrat gate <create-local|create-sample|inspect>");
   }
 }
 
@@ -591,6 +833,21 @@ async function commandGateInspect(options: {
   }
 
   const store = new FileObjectStore(options.home.objectsDir);
+  const raw = store.getJson<unknown>(ref);
+  if (isDeploymentGateArtifact(raw)) {
+    options.emitOut(
+      JSON.stringify(
+        {
+          gate_ref: raw.gate_ref,
+          artifact_ref: ref,
+          ...raw.inspection
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
   const loaded = readDeploymentGateRef(store, ref);
   const inspection = await inspectGateWithGateway(options.home, store, loaded.gate);
   options.emitOut(
@@ -604,6 +861,75 @@ async function commandGateInspect(options: {
       2
     )
   );
+}
+
+async function commandGateCreateLocal(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const registration = registerProject(options.home, options.cwd);
+  const store = new FileObjectStore(options.home.objectsDir);
+  const backtestReportRef = requiredFlag(options.argv, "--backtest-report-ref");
+  const riskPolicyRef = requiredFlag(options.argv, "--risk-policy-ref");
+  const report = BacktestReportSchema.parse(store.getJson(backtestReportRef));
+  const minTrades = optionalNumberFlag(options.argv, "--min-trades") ?? 1;
+  const minWinRate = optionalNumberFlag(options.argv, "--min-win-rate") ?? 0;
+  const maxDrawdownPct = optionalNumberFlag(options.argv, "--max-drawdown-pct") ?? 100;
+  const maxAgeMinutes = optionalNumberFlag(options.argv, "--max-age-minutes");
+  const createdAt = new Date().toISOString();
+  const gate = DeploymentGateSchema.parse({
+    id: `local_gate_${Date.now()}_${safeRefSegment(report.strategy_id)}`,
+    created_at: createdAt,
+    strategy_id: report.strategy_id,
+    strategy_version: report.strategy_version,
+    backtest: {
+      dataset_ref: report.dataset_ref,
+      min_win_rate: minWinRate,
+      min_trades: minTrades,
+      max_drawdown_pct: maxDrawdownPct,
+      include_fees: true,
+      include_slippage_model: true
+    },
+    deployment: {
+      mode: "paper_trading",
+      duration_hours: 12,
+      max_notional_usd: 1000,
+      max_daily_loss_usd: 250,
+      kill_switch: false
+    },
+    required_reviews: []
+  });
+  const inspection = await inspectLocalGateEvidence({
+    createdAt,
+    gate,
+    home: options.home,
+    report,
+    store,
+    ...(maxAgeMinutes !== undefined ? { maxAgeMinutes } : {})
+  });
+  const gateRef = projectObjectRef(registration, "gates", gate.id, "gate.json");
+  const artifactRef = projectObjectRef(registration, "gates", gate.id, "artifact.json");
+  const artifact: DeploymentGateArtifact = {
+    artifact_ref: artifactRef,
+    created_at: createdAt,
+    gate_ref: gateRef,
+    strategy_ref: report.strategy_id,
+    backtest_report_ref: backtestReportRef,
+    risk_policy_ref: riskPolicyRef,
+    inspection
+  };
+  store.putJson(gateRef, gate);
+  store.putJson(artifactRef, artifact);
+
+  options.emitOut(`gate: ${gateRef}`);
+  options.emitOut(`artifact: ${artifactRef}`);
+  options.emitOut(`ready: ${inspection.ready ? "yes" : "no"}`);
+  for (const requirement of inspection.missing_requirements) {
+    options.emitOut(`missing: ${requirement}`);
+  }
 }
 
 async function commandDeploy(options: {
@@ -1677,6 +2003,7 @@ async function commandCodexAppServerChat(
 
   const createdAt = new Date().toISOString();
   const manifest = codexChatManifest(options.home, sessionId, createdAt);
+  const contextStatusRef = writeProjectStatusArtifact(options.home, options.cwd);
   const existingBinding = resumeSessionId
     ? bindingStore.read(resumeSessionId)
     : undefined;
@@ -1696,8 +2023,15 @@ async function commandCodexAppServerChat(
         manifest,
         toolNames: ["market_data.read_snapshot"]
       });
-  await adapter.prompt({ session_id: sessionId, prompt });
+  await adapter.prompt({
+    session_id: sessionId,
+    prompt: `${prompt}\n\nOpenStrat project_status_ref: ${contextStatusRef}`
+  });
   await adapter.dispose(sessionId);
+  const projectStatusRef = writeProjectStatusArtifact(options.home, options.cwd, {
+    chat_session_id: sessionId,
+    transcript_ref: runtime.transcript_ref
+  });
 
   const stream = events.list(`agent_sessions/${sessionId}`);
   const deltas = stream
@@ -1716,6 +2050,7 @@ async function commandCodexAppServerChat(
     options.emitOut(`resumed codex thread: ${runtime.resumed_from_codex_thread_id}`);
   }
   options.emitOut(`transcript: ${runtime.transcript_ref}`);
+  options.emitOut(`project_status: ${projectStatusRef}`);
   options.emitOut(`disabled native tools: ${runtime.disabled_native_tools.join(",")}`);
   events.close();
 }
@@ -1820,6 +2155,120 @@ async function commandArtifacts(options: {
   events.close();
 }
 
+async function commandProject(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  const subcommand = options.argv.shift();
+  switch (subcommand) {
+    case "status": {
+      ensureOpenStratHome(options.home);
+      const status = buildProjectStatus(options.home, options.cwd);
+      options.setJsonData({ ...status });
+      options.emitOut(`home: ${status.home.root}`);
+      options.emitOut(`project: ${status.project.id}`);
+      options.emitOut(`project_objects: ${status.project.object_root}`);
+      if (status.latest.dataset_ref) {
+        options.emitOut(`dataset: ${status.latest.dataset_ref}`);
+      }
+      if (status.latest.backtest_report_ref) {
+        options.emitOut(`backtest_report: ${status.latest.backtest_report_ref}`);
+      }
+      if (status.latest.gate_artifact_ref) {
+        options.emitOut(`gate_artifact: ${status.latest.gate_artifact_ref}`);
+      }
+      if (status.latest.transcript_ref) {
+        options.emitOut(`transcript: ${status.latest.transcript_ref}`);
+      }
+      return;
+    }
+    default:
+      throw new Error("Usage: openstrat project status");
+  }
+}
+
+async function commandBundle(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  const subcommand = options.argv.shift();
+  switch (subcommand) {
+    case "export":
+      commandBundleExport(options);
+      return;
+    default:
+      throw new Error("Usage: openstrat bundle export --latest");
+  }
+}
+
+function commandBundleExport(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): void {
+  ensureOpenStratHome(options.home);
+  if (!options.argv.includes("--latest")) {
+    throw new Error("Usage: openstrat bundle export --latest");
+  }
+  const registration = registerProject(options.home, options.cwd);
+  const store = new FileObjectStore(options.home.objectsDir);
+  const status = buildProjectStatus(options.home, options.cwd);
+  store.putJson(status.status_ref, status, { overwrite: true });
+  const createdAt = new Date().toISOString();
+  const bundleId = `bundle_${timestampRefSegment(createdAt)}_${safeRefSegment(
+    registration.id
+  )}`;
+  const bundleDir = join(options.home.root, "exports", bundleId);
+  mkdirSync(bundleDir, { recursive: true });
+  const refs = projectStatusEvidenceRefs(store, status);
+  const objects = Object.fromEntries(
+    refs
+      .filter((ref) => store.exists(ref))
+      .map((ref) => [ref, store.getJson(ref)] as const)
+  );
+  const manifestPath = join(bundleDir, "bundle.json");
+  const artifactsPath = join(bundleDir, "artifacts.json");
+  const manifest = {
+    command: "bundle",
+    subcommand: "export",
+    id: bundleId,
+    created_at: createdAt,
+    project: status.project,
+    status,
+    refs,
+    artifacts_path: artifactsPath
+  };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeFileSync(
+    artifactsPath,
+    `${JSON.stringify({ created_at: createdAt, objects }, null, 2)}\n`,
+    "utf8"
+  );
+  const latestManifestPath = join(options.home.root, "exports", "latest.json");
+  writeFileSync(latestManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  options.setJsonData({
+    command: "bundle",
+    subcommand: "export",
+    bundle_dir: bundleDir,
+    manifest_path: manifestPath,
+    artifacts_path: artifactsPath,
+    refs
+  });
+  options.emitOut(`bundle: ${bundleDir}`);
+  options.emitOut(`manifest: ${manifestPath}`);
+  options.emitOut(`artifacts: ${artifactsPath}`);
+  options.emitOut(`refs: ${refs.length}`);
+}
+
 async function commandGateway(options: {
   emitOut: (line: string) => void;
   home: OpenStratHome;
@@ -1893,7 +2342,7 @@ function codexChatManifest(home: OpenStratHome, sessionId: string, createdAt: st
 function printHelp(emitOut: (line: string) => void): void {
   emitOut("openstrat <command>");
   emitOut(
-    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy init|validate|propose-sample, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
+    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy init|validate|propose-sample, backtest run|run-sample, gate create-local|create-sample|inspect, project status, bundle export, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
   );
 }
 
@@ -2125,6 +2574,247 @@ async function inspectGateWithGateway(
   );
 }
 
+async function inspectLocalGateEvidence(input: {
+  createdAt: string;
+  gate: DeploymentGate;
+  home: OpenStratHome;
+  maxAgeMinutes?: number;
+  report: BacktestReport;
+  store: FileObjectStore;
+}): Promise<DeploymentGateInspection> {
+  const staticInspection = await inspectGateWithGateway(
+    input.home,
+    input.store,
+    input.gate
+  );
+  const missing = [...staticInspection.missing_requirements];
+  const report = input.report;
+  const gate = input.gate;
+
+  if (report.dataset_ref !== gate.backtest.dataset_ref) {
+    missing.push(
+      `backtest dataset mismatch: expected ${gate.backtest.dataset_ref}, got ${report.dataset_ref}`
+    );
+  }
+  if (report.metrics.trades < gate.backtest.min_trades) {
+    missing.push(
+      `backtest trades below minimum: expected ${gate.backtest.min_trades}, got ${report.metrics.trades}`
+    );
+  }
+  if (report.metrics.win_rate < gate.backtest.min_win_rate) {
+    missing.push(
+      `backtest win rate below minimum: expected ${gate.backtest.min_win_rate}, got ${report.metrics.win_rate}`
+    );
+  }
+  if (report.metrics.max_drawdown_pct > gate.backtest.max_drawdown_pct) {
+    missing.push(
+      `backtest drawdown above maximum: expected ${gate.backtest.max_drawdown_pct}, got ${report.metrics.max_drawdown_pct}`
+    );
+  }
+  if (input.maxAgeMinutes !== undefined) {
+    const ageMs = Date.parse(input.createdAt) - Date.parse(report.generated_at);
+    if (ageMs > input.maxAgeMinutes * 60_000) {
+      missing.push(
+        `backtest report stale: generated_at ${report.generated_at} exceeds ${input.maxAgeMinutes} minutes`
+      );
+    }
+  }
+
+  const missingRequirements = uniqueStrings(missing);
+  return {
+    gate_id: gate.id,
+    ready: missingRequirements.length === 0,
+    missing_requirements: missingRequirements,
+    required_reviews: gate.required_reviews
+  };
+}
+
+function writeLocalStrategyObjectRefs(input: {
+  createdAt: string;
+  loadedStrategy: LoadedLocalStrategy;
+  registration: ReturnType<typeof registerProject>;
+  store: FileObjectStore;
+}): { manifest_ref: string; source_ref: string } {
+  const strategy = input.loadedStrategy.strategy.manifest;
+  const root = projectObjectRef(
+    input.registration,
+    "strategies",
+    safeRefSegment(strategy.strategy_id),
+    timestampRefSegment(input.createdAt)
+  );
+  const manifestRef = `${root}/manifest.json`;
+  const sourceRef = `${root}/source.json`;
+  input.store.putJson(manifestRef, strategy);
+  input.store.putJson(sourceRef, {
+    strategy_id: strategy.strategy_id,
+    strategy_version: strategy.strategy_version,
+    created_at: input.createdAt,
+    ...(input.loadedStrategy.source_path
+      ? {
+          source_path: input.loadedStrategy.source_path,
+          relative_path: toPosixPath(
+            relative(input.registration.cwd, input.loadedStrategy.source_path)
+          ),
+          content: readFileSync(input.loadedStrategy.source_path, "utf8")
+        }
+      : {})
+  });
+  return { manifest_ref: manifestRef, source_ref: sourceRef };
+}
+
+function latestStrategyValidationRef(
+  home: OpenStratHome,
+  projectRoot: string,
+  strategyId: string,
+  datasetRef: string
+): string | undefined {
+  const store = new FileObjectStore(home.objectsDir);
+  const refs = listObjectRefs(
+    home,
+    `${projectRoot}/workbench/strategy-validations/${safeRefSegment(strategyId)}`
+  );
+  for (const ref of [...refs].reverse()) {
+    const parsed = safeGetJson<StrategyValidationArtifact>(store, ref);
+    if (!parsed) {
+      continue;
+    }
+    if (parsed.dataset_preflight?.dataset_ref === datasetRef) {
+      return ref;
+    }
+  }
+  return undefined;
+}
+
+function buildProjectStatus(
+  home: OpenStratHome,
+  cwd: string,
+  latestOverrides: Partial<ProjectStatusSnapshot["latest"]> = {}
+): ProjectStatusSnapshot {
+  const registration = registerProject(home, cwd);
+  const store = new FileObjectStore(home.objectsDir);
+  const objectRoot = projectObjectRoot(registration);
+  const datasetRefs = listMarketDatasetRefs(home);
+  const latestDatasetRef = latestDatasetByCreatedAt(store, datasetRefs);
+  const validationRefs = listObjectRefs(
+    home,
+    `${objectRoot}/workbench/strategy-validations`
+  );
+  const backtestRefs = listObjectRefs(home, `${objectRoot}/backtests`);
+  const backtestReportRefs = backtestRefs.filter((ref) => ref.endsWith("/report.json"));
+  const latestBacktestReportRef = latestRef(backtestReportRefs);
+  const latestBacktestReport = latestBacktestReportRef
+    ? safeGetJson<BacktestReport>(store, latestBacktestReportRef)
+    : undefined;
+  const backtestRoot = latestBacktestReportRef
+    ? latestBacktestReportRef.slice(0, -"report.json".length)
+    : undefined;
+  const requestRef = backtestRoot ? `${backtestRoot}request.json` : undefined;
+  const metricsRef = backtestRoot ? `${backtestRoot}metrics.json` : undefined;
+  const gateArtifactRefs = listObjectRefs(home, `${objectRoot}/gates`).filter((ref) =>
+    ref.endsWith("/artifact.json")
+  );
+  const latestGateArtifactRef = latestRef(gateArtifactRefs);
+  const latestGateArtifact = latestGateArtifactRef
+    ? safeGetJson<DeploymentGateArtifact>(store, latestGateArtifactRef)
+    : undefined;
+  const strategyPaths = localStrategyPaths(cwd);
+  const chatSessions = listChatSessions(home);
+  const latestChatSession = latestRef(chatSessions.map((session) => session.id));
+  const latestTranscript = latestChatSession
+    ? chatSessions.find((session) => session.id === latestChatSession)
+    : undefined;
+  const exportManifests = listExportManifestPaths(home);
+
+  const latest: ProjectStatusSnapshot["latest"] = {
+    ...strategyPaths,
+    ...(latestDatasetRef ? { dataset_ref: latestDatasetRef } : {}),
+    ...optionalLatestRef("strategy_validation_ref", latestRef(validationRefs)),
+    ...(requestRef && store.exists(requestRef)
+      ? { backtest_request_ref: requestRef }
+      : {}),
+    ...(latestBacktestReportRef
+      ? { backtest_report_ref: latestBacktestReportRef }
+      : {}),
+    ...(metricsRef && store.exists(metricsRef)
+      ? { backtest_metrics_ref: metricsRef }
+      : {}),
+    ...(latestBacktestReport?.trade_ledger_ref
+      ? { trade_ledger_ref: latestBacktestReport.trade_ledger_ref }
+      : {}),
+    ...(latestGateArtifact?.gate_ref ? { gate_ref: latestGateArtifact.gate_ref } : {}),
+    ...(latestGateArtifactRef ? { gate_artifact_ref: latestGateArtifactRef } : {}),
+    ...(latestTranscript
+      ? {
+          chat_session_id: latestTranscript.id,
+          transcript_ref: latestTranscript.transcript_ref
+        }
+      : {}),
+    ...optionalLatestRef("export_manifest_path", latestRef(exportManifests)),
+    ...latestOverrides
+  };
+  return {
+    command: "project",
+    subcommand: "status",
+    generated_at: new Date().toISOString(),
+    home: {
+      root: home.root,
+      objects_dir: home.objectsDir,
+      sessions_dir: home.sessionsDir
+    },
+    project: {
+      id: registration.id,
+      cwd: registration.cwd,
+      registration_ref: registration.ref,
+      object_root: objectRoot
+    },
+    latest,
+    counts: {
+      datasets: datasetRefs.length,
+      validations: validationRefs.length,
+      backtests: backtestReportRefs.length,
+      gates: gateArtifactRefs.length,
+      chat_sessions: chatSessions.length,
+      exports: exportManifests.length
+    },
+    status_ref: projectObjectRef(registration, "status", "latest.json")
+  };
+}
+
+function writeProjectStatusArtifact(
+  home: OpenStratHome,
+  cwd: string,
+  latestOverrides: Partial<ProjectStatusSnapshot["latest"]> = {}
+): string {
+  const status = buildProjectStatus(home, cwd, latestOverrides);
+  new FileObjectStore(home.objectsDir).putJson(status.status_ref, status, {
+    overwrite: true
+  });
+  return status.status_ref;
+}
+
+function projectStatusEvidenceRefs(
+  store: FileObjectStore,
+  status: ProjectStatusSnapshot
+): string[] {
+  const directRefs = [
+    status.latest.dataset_ref,
+    status.latest.strategy_validation_ref,
+    status.latest.backtest_request_ref,
+    status.latest.backtest_report_ref,
+    status.latest.backtest_metrics_ref,
+    status.latest.trade_ledger_ref,
+    status.latest.gate_ref,
+    status.latest.gate_artifact_ref,
+    status.status_ref
+  ].filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+  const reportRefs =
+    status.latest.backtest_report_ref && store.exists(status.latest.backtest_report_ref)
+      ? BacktestReportSchema.parse(store.getJson(status.latest.backtest_report_ref))
+          .artifact_refs
+      : [];
+  return uniqueRefs([...directRefs, ...reportRefs]);
+}
+
 async function withCliAgentToolGateway<T>(
   home: OpenStratHome,
   store: FileObjectStore,
@@ -2278,6 +2968,107 @@ function safeRefSegment(value: string): string {
       .replace(/[^a-zA-Z0-9._-]+/g, "_")
       .replace(/^_+|_+$/g, "") || "ref"
   );
+}
+
+function optionalLatestRef<Key extends keyof ProjectStatusSnapshot["latest"]>(
+  key: Key,
+  value: string | undefined
+): Partial<Pick<ProjectStatusSnapshot["latest"], Key>> {
+  return value
+    ? ({ [key]: value } as Partial<Pick<ProjectStatusSnapshot["latest"], Key>>)
+    : {};
+}
+
+function latestRef(refs: readonly string[]): string | undefined {
+  if (refs.length === 0) {
+    return undefined;
+  }
+  const sorted = [...refs].sort();
+  return sorted[sorted.length - 1];
+}
+
+function latestDatasetByCreatedAt(
+  store: FileObjectStore,
+  refs: readonly string[]
+): string | undefined {
+  const datasets = refs
+    .map((ref) => safeGetJson<MarketDatasetManifest>(store, ref))
+    .filter((dataset): dataset is MarketDatasetManifest => dataset !== undefined)
+    .sort((left, right) => left.created_at.localeCompare(right.created_at));
+  return datasets[datasets.length - 1]?.dataset_ref;
+}
+
+function safeGetJson<T>(store: FileObjectStore, ref: string): T | undefined {
+  try {
+    return store.getJson<T>(ref);
+  } catch {
+    return undefined;
+  }
+}
+
+function localStrategyPaths(cwd: string): {
+  strategy_manifest_path?: string;
+  strategy_source_path?: string;
+} {
+  const manifestPath = join(cwd, "openstrat.strategy.json");
+  if (!existsSync(manifestPath)) {
+    return {};
+  }
+  let parsedManifest: unknown;
+  try {
+    parsedManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch {
+    return { strategy_manifest_path: manifestPath };
+  }
+  const manifest = StrategyManifestSchema.safeParse(parsedManifest);
+  if (!manifest.success) {
+    return { strategy_manifest_path: manifestPath };
+  }
+  const sourcePath = join(cwd, manifest.data.entrypoint);
+  return {
+    strategy_manifest_path: manifestPath,
+    ...(existsSync(sourcePath) ? { strategy_source_path: sourcePath } : {})
+  };
+}
+
+function listChatSessions(
+  home: OpenStratHome
+): { id: string; transcript_ref: string }[] {
+  if (!existsSync(home.sessionsDir)) {
+    return [];
+  }
+  return readdirSync(home.sessionsDir)
+    .filter((entry) => entry.endsWith(".jsonl"))
+    .sort()
+    .map((entry) => ({
+      id: entry.replace(/\.jsonl$/u, ""),
+      transcript_ref: join(home.sessionsDir, entry)
+    }));
+}
+
+function listExportManifestPaths(home: OpenStratHome): string[] {
+  const exportsRoot = join(home.root, "exports");
+  if (!existsSync(exportsRoot)) {
+    return [];
+  }
+  const manifests: string[] = [];
+  for (const entry of readdirSync(exportsRoot, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const manifestPath = join(exportsRoot, entry.name, "bundle.json");
+      if (existsSync(manifestPath)) {
+        manifests.push(manifestPath);
+      }
+    }
+  }
+  return manifests.sort();
+}
+
+function uniqueRefs(refs: readonly string[]): string[] {
+  return [...new Set(refs)];
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 function listMarketDatasetRefs(home: OpenStratHome): string[] {

@@ -224,6 +224,277 @@ describe("openstrat CLI commands", () => {
     });
   });
 
+  it("runs the project-local MVP research loop against fake auth and fixture data", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = {
+      HOME: userHome,
+      OPENSTRAT_FAKE_CODEX_AUTH: "1",
+      OPENSTRAT_FAKE_HYPERLIQUID: "1",
+      OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
+    };
+
+    const init = await runOpenStratCli({ argv: ["init"], cwd, env });
+    const auth = await runOpenStratCli({ argv: ["auth", "codex"], cwd, env });
+    const doctor = await runOpenStratCli({ argv: ["doctor"], cwd, env });
+    const strategyInit = await runOpenStratCli({
+      argv: [
+        "strategy",
+        "init",
+        "--strategy-id",
+        "local_btc_breakout",
+        "--symbol",
+        "BTC-PERP",
+        "--interval",
+        "15m"
+      ],
+      cwd,
+      env
+    });
+    const ingest = await runOpenStratCli({
+      argv: ["market", "ingest-fixture", "--symbol", "BTC", "--interval", "15m"],
+      cwd,
+      env
+    });
+    const datasetRef = lineValue(ingest.stdout, "dataset: ");
+    const validate = await runOpenStratCli({
+      argv: [
+        "strategy",
+        "validate",
+        "--manifest",
+        "openstrat.strategy.json",
+        "--dataset-ref",
+        datasetRef,
+        "--as-of",
+        "2026-06-04T00:00:00.000Z"
+      ],
+      cwd,
+      env
+    });
+    const validationRef = lineValue(validate.stdout, "validation: ");
+    const projectId = lineValue(strategyInit.stdout, "project: ");
+    const projectRoot = lineValue(strategyInit.stdout, "project_objects: ");
+
+    const backtest = await runOpenStratCli({
+      argv: [
+        "backtest",
+        "run",
+        "--manifest",
+        "openstrat.strategy.json",
+        "--dataset-ref",
+        datasetRef,
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10",
+        "--as-of",
+        "2026-06-04T00:00:00.000Z"
+      ],
+      cwd,
+      env
+    });
+    const requestRef = lineValue(backtest.stdout, "request: ");
+    const reportRef = lineValue(backtest.stdout, "report: ");
+    const ledgerRef = lineValue(backtest.stdout, "trade_ledger: ");
+    const metricsRef = lineValue(backtest.stdout, "metrics: ");
+
+    const gate = await runOpenStratCli({
+      argv: [
+        "gate",
+        "create-local",
+        "--backtest-report-ref",
+        reportRef,
+        "--risk-policy-ref",
+        "risk/local",
+        "--min-trades",
+        "1"
+      ],
+      cwd,
+      env
+    });
+    const gateRef = lineValue(gate.stdout, "gate: ");
+    const gateArtifactRef = lineValue(gate.stdout, "artifact: ");
+
+    const chat = await runOpenStratCli({
+      argv: ["chat", "--prompt", "Summarize the current OpenStrat project state."],
+      cwd,
+      env
+    });
+    const sessionId = lineValue(chat.stdout, "session: ");
+    const transcriptRef = lineValue(chat.stdout, "transcript: ");
+    const chatProjectStatusRef = lineValue(chat.stdout, "project_status: ");
+    const resume = await runOpenStratCli({
+      argv: [
+        "chat",
+        "--resume",
+        sessionId,
+        "--prompt",
+        "Continue from the OpenStrat project status."
+      ],
+      cwd,
+      env
+    });
+
+    const status = await runOpenStratCli({
+      argv: ["project", "status", "--json"],
+      cwd,
+      env
+    });
+    const statusEnvelope = parseCliJson(status.stdout);
+    const statusData = statusEnvelope.result.data as {
+      home: { root: string };
+      latest: {
+        backtest_report_ref?: string;
+        dataset_ref?: string;
+        gate_artifact_ref?: string;
+        strategy_validation_ref?: string;
+        transcript_ref?: string;
+      };
+      project: { id: string; object_root: string };
+    };
+
+    const bundle = await runOpenStratCli({
+      argv: ["bundle", "export", "--latest"],
+      cwd,
+      env
+    });
+    const bundleDir = lineValue(bundle.stdout, "bundle: ");
+    const bundleManifestPath = lineValue(bundle.stdout, "manifest: ");
+    const bundleArtifactsPath = lineValue(bundle.stdout, "artifacts: ");
+
+    const home = projectOpenStratRoot(cwd);
+    const request = JSON.parse(
+      readFileSync(join(home, "objects", requestRef), "utf8")
+    ) as {
+      command_inputs: Record<string, unknown>;
+      dataset_ref: string;
+      fee_model_ref: string;
+      generated_at: string;
+      slippage_model_ref: string;
+      strategy_manifest_ref: string;
+      strategy_source_ref: string;
+      validation_ref?: string;
+    };
+    const report = JSON.parse(
+      readFileSync(join(home, "objects", reportRef), "utf8")
+    ) as {
+      artifact_refs: string[];
+      dataset_ref: string;
+      metrics: { trades: number };
+      trade_ledger_ref: string;
+    };
+    const metrics = JSON.parse(
+      readFileSync(join(home, "objects", metricsRef), "utf8")
+    ) as {
+      backtest_report_ref: string;
+      metrics: { trades: number };
+    };
+    const gateArtifact = JSON.parse(
+      readFileSync(join(home, "objects", gateArtifactRef), "utf8")
+    ) as {
+      backtest_report_ref: string;
+      gate_ref: string;
+      inspection: { missing_requirements: string[]; ready: boolean };
+    };
+    const bundleManifest = JSON.parse(readFileSync(bundleManifestPath, "utf8")) as {
+      refs: string[];
+      status: { latest: { gate_artifact_ref?: string } };
+    };
+    const bundleArtifacts = JSON.parse(readFileSync(bundleArtifactsPath, "utf8")) as {
+      objects: Record<string, unknown>;
+    };
+
+    expect(init.exitCode).toBe(0);
+    expect(auth.exitCode).toBe(0);
+    expect(doctor.stdout.join("\n")).toContain("Codex auth: configured");
+    expect(backtest.exitCode).toBe(0);
+    expect(requestRef).toContain(`${projectRoot}/backtests/`);
+    expect(reportRef).toContain(`${projectRoot}/backtests/`);
+    expect(ledgerRef).toContain(`${projectRoot}/backtests/`);
+    expect(metricsRef).toContain(`${projectRoot}/backtests/`);
+    expect(request).toMatchObject({
+      dataset_ref: datasetRef,
+      fee_model_ref: "fees/fixed/5bps",
+      slippage_model_ref: "slippage/fixed/10bps",
+      validation_ref: validationRef
+    });
+    expect(request.strategy_manifest_ref).toContain(
+      `${projectRoot}/strategies/local_btc_breakout/`
+    );
+    expect(request.strategy_source_ref).toContain(
+      `${projectRoot}/strategies/local_btc_breakout/`
+    );
+    expect(report.dataset_ref).toBe(datasetRef);
+    expect(report.trade_ledger_ref).toBe(ledgerRef);
+    expect(report.artifact_refs).toEqual(
+      expect.arrayContaining([
+        requestRef,
+        metricsRef,
+        request.strategy_manifest_ref,
+        request.strategy_source_ref
+      ])
+    );
+    expect(metrics).toMatchObject({
+      backtest_report_ref: reportRef,
+      metrics: { trades: report.metrics.trades }
+    });
+    expect(gate.exitCode).toBe(0);
+    expect(gateRef).toContain(`${projectRoot}/gates/`);
+    expect(gateArtifactRef).toContain(`${projectRoot}/gates/`);
+    expect(gate.stdout.join("\n")).toContain("ready: no");
+    expect(gateArtifact).toMatchObject({
+      backtest_report_ref: reportRef,
+      gate_ref: gateRef,
+      inspection: {
+        ready: false,
+        missing_requirements: expect.arrayContaining([
+          "risk review required",
+          "backtest trades below minimum: expected 1, got 0"
+        ])
+      }
+    });
+    expect(chat.exitCode).toBe(0);
+    expect(chatProjectStatusRef).toBe(`${projectRoot}/status/latest.json`);
+    expect(transcriptRef).toContain(sessionId);
+    expect(resume.exitCode).toBe(0);
+    expect(resume.stdout.join("\n")).toContain(
+      `project_status: ${chatProjectStatusRef}`
+    );
+    expect(status.exitCode).toBe(0);
+    expect(statusEnvelope.result.status).toBe("completed");
+    expect(statusData.home.root).toBe(home);
+    expect(statusData.project).toMatchObject({
+      id: projectId,
+      object_root: projectRoot
+    });
+    expect(statusData.latest).toMatchObject({
+      backtest_report_ref: reportRef,
+      dataset_ref: datasetRef,
+      gate_artifact_ref: gateArtifactRef,
+      strategy_validation_ref: validationRef
+    });
+    expect(statusData.latest.transcript_ref).toContain(sessionId);
+    expect(bundle.exitCode).toBe(0);
+    expect(existsSync(bundleDir)).toBe(true);
+    expect(bundleManifest.refs).toEqual(
+      expect.arrayContaining([
+        datasetRef,
+        validationRef,
+        requestRef,
+        reportRef,
+        ledgerRef,
+        metricsRef,
+        gateArtifactRef,
+        chatProjectStatusRef
+      ])
+    );
+    expect(bundleManifest.status.latest.gate_artifact_ref).toBe(gateArtifactRef);
+    expect(Object.keys(bundleArtifacts.objects)).toEqual(
+      expect.arrayContaining([reportRef, ledgerRef, gateArtifactRef])
+    );
+    expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
+  });
+
   it("prints final assistant text when Pi does not stream text deltas", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));

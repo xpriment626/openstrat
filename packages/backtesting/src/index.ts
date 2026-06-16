@@ -56,6 +56,7 @@ export interface CandleBacktestRequest {
   run_id: string;
   strategy: StrategyModule;
   object_store: ObjectStore;
+  artifact_ref_root?: string;
   dataset_ref: string;
   candle_refs: string[];
   raw_artifact_refs: string[];
@@ -278,7 +279,8 @@ export async function runCandleBacktest(
     }
   }
 
-  const tradeLedgerRef = `backtests/${request.run_id}/trade-ledger.json`;
+  const tradeLedgerRoot = request.artifact_ref_root ?? `backtests/${request.run_id}`;
+  const tradeLedgerRef = `${tradeLedgerRoot}/trade-ledger.json`;
   request.object_store.putJson(tradeLedgerRef, tradeLedger);
 
   const wins = tradeLedger.filter((trade) => trade.net_pnl_usd > 0).length;
