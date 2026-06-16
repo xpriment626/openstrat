@@ -6,9 +6,10 @@ import {
   readFileSync,
   writeFileSync
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, relative, resolve, join } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { pathToFileURL } from "node:url";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
 import {
   createAgentRuntimePolicy,
@@ -36,11 +37,13 @@ import {
   DeploymentGateSchema,
   MarketDatasetManifestSchema,
   MemoryProposalSchema,
+  StrategyManifestSchema,
   type AgentResultEnvelope,
   type BotRunManifest,
   type DeploymentGate,
   type MarketDatasetManifest,
-  type NormalizedMarketDataRef
+  type NormalizedMarketDataRef,
+  type StrategyManifest
 } from "@openstrat/domain";
 import {
   getMarketDatasetManifest,
@@ -70,6 +73,8 @@ import {
   findProjectRegistration,
   getPiAuthPath,
   listProjectRegistrations,
+  projectObjectRef,
+  projectObjectRoot,
   registerProject,
   resolveOpenStratHome,
   safePurgeOpenStratHome,
@@ -110,6 +115,31 @@ interface DeploymentGateArtifact {
   backtest_report_ref: string;
   risk_policy_ref: string;
   inspection: DeploymentGateInspection;
+}
+
+interface StrategyValidationArtifact {
+  validation_ref: string;
+  created_at: string;
+  project: {
+    id: string;
+    cwd: string;
+    registration_ref: string;
+    object_root: string;
+  };
+  strategy: StrategyManifest;
+  manifest_path?: string;
+  source_path?: string;
+  dataset_preflight?: {
+    dataset_ref: string;
+    required_families: string[];
+    validation: {
+      valid: boolean;
+      missing_requirements: string[];
+    };
+  };
+  evaluation: {
+    intents: number;
+  };
 }
 
 type ChatRuntimeKind = "codex_app_server" | "pi";
@@ -205,7 +235,7 @@ export async function runOpenStratCli(
         await commandMarket({ argv, emitOut, env, home, setJsonData });
         break;
       case "strategy":
-        await commandStrategy({ argv, emitOut, home });
+        await commandStrategy({ argv, cwd, emitOut, home, setJsonData });
         break;
       case "backtest":
         await commandBacktest({ argv, emitOut, home });
@@ -936,11 +966,16 @@ function commandMemoryList(options: {
 
 async function commandStrategy(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
   home: OpenStratHome;
+  setJsonData: SetCliJsonData;
 }): Promise<void> {
   const subcommand = options.argv.shift();
   switch (subcommand) {
+    case "init":
+      commandStrategyInit(options);
+      return;
     case "validate":
       await commandStrategyValidate(options);
       return;
@@ -948,44 +983,205 @@ async function commandStrategy(options: {
       commandStrategyProposeSample(options);
       return;
     default:
-      throw new Error("Usage: openstrat strategy <validate|propose-sample>");
+      throw new Error("Usage: openstrat strategy <init|validate|propose-sample>");
   }
+}
+
+function commandStrategyInit(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): void {
+  ensureOpenStratHome(options.home);
+  const registration = registerProject(options.home, options.cwd);
+  const strategyId = stringFlag(options.argv, "--strategy-id") ?? "local_strategy";
+  const safeStrategyId = safeRefSegment(strategyId);
+  const canonicalSymbol =
+    stringFlag(options.argv, "--symbol")?.toUpperCase() ?? "BTC-PERP";
+  const interval = stringFlag(options.argv, "--interval") ?? "15m";
+  const manifestRel =
+    stringFlag(options.argv, "--manifest") ?? "openstrat.strategy.json";
+  const entrypointRel =
+    stringFlag(options.argv, "--entrypoint") ?? `strategies/${safeStrategyId}.ts`;
+  const manifestPath = resolveWorkspacePath(
+    options.cwd,
+    manifestRel,
+    "strategy manifest"
+  );
+  const entrypointPath = resolveWorkspacePath(
+    options.cwd,
+    entrypointRel,
+    "strategy entrypoint"
+  );
+  const manifest = StrategyManifestSchema.parse({
+    strategy_id: strategyId,
+    strategy_version: "0.1.0",
+    name: titleFromStrategyId(strategyId),
+    description: "Local OpenStrat strategy scaffold.",
+    runtime: "typescript",
+    entrypoint: toPosixPath(relative(resolve(options.cwd), entrypointPath)),
+    autonomy_mode: "strategy_workbench",
+    allowed_symbols: [canonicalSymbol],
+    parameters: {},
+    required_data: [
+      {
+        kind: "candles",
+        canonical_symbol: canonicalSymbol,
+        interval
+      }
+    ],
+    output: "trade_intent",
+    created_at: new Date().toISOString(),
+    source_refs: []
+  });
+
+  assertNewFile(manifestPath);
+  assertNewFile(entrypointPath);
+  writeNewFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeNewFile(entrypointPath, localStrategySource(strategyId));
+
+  const objectRoot = projectObjectRoot(registration);
+  options.setJsonData({
+    command: "strategy",
+    subcommand: "init",
+    home: options.home.root,
+    project: registration,
+    project_object_root: objectRoot,
+    manifest_path: manifestPath,
+    source_path: entrypointPath
+  });
+  options.emitOut(`home: ${options.home.root}`);
+  options.emitOut(`project: ${registration.id}`);
+  options.emitOut(`project_objects: ${objectRoot}`);
+  options.emitOut(
+    `manifest: ${toPosixPath(relative(resolve(options.cwd), manifestPath))}`
+  );
+  options.emitOut(
+    `source: ${toPosixPath(relative(resolve(options.cwd), entrypointPath))}`
+  );
 }
 
 async function commandStrategyValidate(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
 }): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const registration = registerProject(options.home, options.cwd);
+  const store = new FileObjectStore(options.home.objectsDir);
   const sample = stringFlag(options.argv, "--sample");
-  const strategy = sampleStrategy(sample);
+  const loadedStrategy: LoadedLocalStrategy = sample
+    ? { strategy: sampleStrategy(sample) }
+    : await loadLocalStrategy(
+        options.cwd,
+        stringFlag(options.argv, "--manifest") ?? "openstrat.strategy.json"
+      );
+  const strategy = loadedStrategy.strategy;
+  const datasetRef = stringFlag(options.argv, "--dataset-ref");
+  const asOf = stringFlag(options.argv, "--as-of");
+  const datasetPreflight = datasetRef
+    ? preflightStrategyDatasetCompatibility({
+        object_store: store,
+        strategy: strategy.manifest,
+        dataset_ref: datasetRef,
+        ...(asOf ? { as_of: asOf } : {})
+      })
+    : undefined;
   const result = await createStrategyRunner().evaluate(strategy, {
-    now: "2026-06-04T00:45:00.000Z",
+    now: asOf ?? "2026-06-04T00:45:00.000Z",
     mode: "paper",
     risk_policy_ref: "risk/sample",
-    decision_ref: "strategy-workbench/sample-validation",
-    market_events: sampleStrategyMarketEvents()
+    decision_ref: "strategy-workbench/validation",
+    market_events: sampleStrategyMarketEvents(strategy.manifest.allowed_symbols[0])
+  });
+  const createdAt = new Date().toISOString();
+  const validationRef = projectObjectRef(
+    registration,
+    "workbench",
+    "strategy-validations",
+    safeRefSegment(strategy.manifest.strategy_id),
+    `${timestampRefSegment(createdAt)}.json`
+  );
+  const objectRoot = projectObjectRoot(registration);
+  const artifact: StrategyValidationArtifact = {
+    validation_ref: validationRef,
+    created_at: createdAt,
+    project: {
+      id: registration.id,
+      cwd: registration.cwd,
+      registration_ref: registration.ref,
+      object_root: objectRoot
+    },
+    strategy: strategy.manifest,
+    ...(loadedStrategy.manifest_path
+      ? { manifest_path: loadedStrategy.manifest_path }
+      : {}),
+    ...(loadedStrategy.source_path ? { source_path: loadedStrategy.source_path } : {}),
+    ...(datasetPreflight
+      ? {
+          dataset_preflight: {
+            dataset_ref: datasetPreflight.manifest.dataset_ref,
+            required_families: datasetPreflight.required_families,
+            validation: {
+              valid: datasetPreflight.validation.valid,
+              missing_requirements: datasetPreflight.validation.missing_requirements
+            }
+          }
+        }
+      : {}),
+    evaluation: {
+      intents: result.intents.length
+    }
+  };
+  store.putJson(validationRef, artifact);
+  options.setJsonData({
+    command: "strategy",
+    subcommand: "validate",
+    validation_ref: validationRef,
+    project_id: registration.id,
+    project_object_root: objectRoot,
+    strategy_id: strategy.manifest.strategy_id,
+    intents: result.intents.length,
+    ...(datasetPreflight ? { dataset_ref: datasetPreflight.manifest.dataset_ref } : {})
   });
 
   options.emitOut(`strategy valid: ${strategy.manifest.strategy_id}`);
   options.emitOut(`intents: ${result.intents.length}`);
+  options.emitOut(`validation: ${validationRef}`);
+  options.emitOut(`home: ${options.home.root}`);
+  options.emitOut(`project: ${registration.id}`);
+  options.emitOut(`project_objects: ${objectRoot}`);
+  if (datasetPreflight) {
+    options.emitOut(`dataset_preflight: ${datasetPreflight.manifest.dataset_ref}`);
+  }
 }
 
 function commandStrategyProposeSample(options: {
   argv: string[];
+  cwd: string;
   emitOut: (line: string) => void;
   home: OpenStratHome;
+  setJsonData: SetCliJsonData;
 }): void {
   ensureOpenStratHome(options.home);
+  const registration = registerProject(options.home, options.cwd);
   const strategyId =
     stringFlag(options.argv, "--strategy-id") ?? "sample_moving_average_breakout";
   const objects = new FileObjectStore(options.home.objectsDir);
   const events = new SqliteEventLog(options.home.stateDbPath);
+  const objectRoot = projectObjectRoot(registration);
   try {
-    const workflow = createStrategyProposalWorkflow({
+    const workflowDependencies = {
       events,
+      object_ref_root: objectRoot,
       objects,
       now: () => "2026-06-04T00:45:00.000Z"
-    });
+    };
+    const workflow = createStrategyProposalWorkflow(workflowDependencies);
     const proposal = workflow.capturePatchBundle({
       session_id: "cli_strategy_workbench",
       turn_id: "turn_strategy_sample",
@@ -1001,12 +1197,147 @@ function commandStrategyProposeSample(options: {
       ]
     });
 
+    options.setJsonData({
+      command: "strategy",
+      subcommand: "propose-sample",
+      project_id: registration.id,
+      project_object_root: objectRoot,
+      proposal_id: proposal.id,
+      artifact_ref: proposal.artifact_ref.uri,
+      patch_ref: proposal.patch_ref
+    });
     options.emitOut(`proposal: ${proposal.id}`);
     options.emitOut(`artifact: ${proposal.artifact_ref.uri}`);
     options.emitOut(`patch: ${proposal.patch_ref}`);
+    options.emitOut(`home: ${options.home.root}`);
+    options.emitOut(`project: ${registration.id}`);
+    options.emitOut(`project_objects: ${objectRoot}`);
   } finally {
     events.close();
   }
+}
+
+interface LoadedLocalStrategy {
+  strategy: StrategyModule;
+  manifest_path?: string;
+  source_path?: string;
+}
+
+async function loadLocalStrategy(
+  cwd: string,
+  manifestInput: string
+): Promise<LoadedLocalStrategy> {
+  const manifestPath = resolveWorkspacePath(cwd, manifestInput, "strategy manifest");
+  const manifest = StrategyManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, "utf8"))
+  );
+  if (manifest.runtime !== "typescript" && manifest.runtime !== "javascript") {
+    throw new Error(
+      `Unsupported local strategy runtime: ${manifest.runtime}. Use typescript or javascript.`
+    );
+  }
+
+  const sourcePath = resolveWorkspacePath(
+    cwd,
+    manifest.entrypoint,
+    "strategy entrypoint"
+  );
+  const imported = (await import(
+    `${pathToFileURL(sourcePath).href}?openstrat=${Date.now()}`
+  )) as unknown;
+  const evaluate = strategyEvaluateFromModule(imported, manifest);
+  return {
+    manifest_path: manifestPath,
+    source_path: sourcePath,
+    strategy: {
+      manifest,
+      evaluate
+    }
+  };
+}
+
+function strategyEvaluateFromModule(
+  imported: unknown,
+  manifest: StrategyManifest
+): StrategyModule["evaluate"] {
+  const module = imported as {
+    evaluate?: unknown;
+    strategy?: { evaluate?: unknown; manifest?: unknown };
+  };
+  if (typeof module.evaluate === "function") {
+    return module.evaluate as StrategyModule["evaluate"];
+  }
+
+  if (module.strategy && typeof module.strategy.evaluate === "function") {
+    const exportedManifest = StrategyManifestSchema.safeParse(module.strategy.manifest);
+    if (
+      exportedManifest.success &&
+      exportedManifest.data.strategy_id !== manifest.strategy_id
+    ) {
+      throw new Error(
+        `Strategy module manifest ${exportedManifest.data.strategy_id} does not match manifest ${manifest.strategy_id}`
+      );
+    }
+    return module.strategy.evaluate as StrategyModule["evaluate"];
+  }
+
+  throw new Error(
+    "Strategy entrypoint must export evaluate(context) or strategy.evaluate"
+  );
+}
+
+function resolveWorkspacePath(cwd: string, inputPath: string, label: string): string {
+  if (!inputPath || inputPath.includes("\0")) {
+    throw new Error(`Invalid ${label} path: ${inputPath}`);
+  }
+  const workspaceRoot = resolve(cwd);
+  const resolvedPath = resolve(workspaceRoot, inputPath);
+  const fromWorkspace = relative(workspaceRoot, resolvedPath);
+  if (
+    fromWorkspace === "" ||
+    fromWorkspace.startsWith("..") ||
+    isAbsolute(fromWorkspace)
+  ) {
+    throw new Error(`${label} path must stay inside the project workspace`);
+  }
+  return resolvedPath;
+}
+
+function writeNewFile(path: string, contents: string): void {
+  assertNewFile(path);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents, "utf8");
+}
+
+function assertNewFile(path: string): void {
+  if (existsSync(path)) {
+    throw new Error(`Refusing to overwrite existing file: ${path}`);
+  }
+}
+
+function localStrategySource(strategyId: string): string {
+  return `export function evaluate(_input: unknown) {
+  return [];
+}
+
+export const strategyId = ${JSON.stringify(strategyId)};
+`;
+}
+
+function titleFromStrategyId(strategyId: string): string {
+  return strategyId
+    .split(/[_-]+/u)
+    .filter((part) => part.length > 0)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
+}
+
+function timestampRefSegment(isoTimestamp: string): string {
+  return isoTimestamp.replace(/[:]/gu, "-");
+}
+
+function toPosixPath(path: string): string {
+  return path.replace(/\\/gu, "/");
 }
 
 async function commandMarket(options: {
@@ -1562,7 +1893,7 @@ function codexChatManifest(home: OpenStratHome, sessionId: string, createdAt: st
 function printHelp(emitOut: (line: string) => void): void {
   emitOut("openstrat <command>");
   emitOut(
-    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
+    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy init|validate|propose-sample, backtest, gate, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
   );
 }
 
@@ -2191,13 +2522,16 @@ function sampleStrategy(sample: string | undefined): StrategyModule {
   }
 }
 
-function sampleStrategyMarketEvents(): StrategyMarketEvent[] {
+function sampleStrategyMarketEvents(
+  canonicalSymbol = "BTC-PERP"
+): StrategyMarketEvent[] {
+  const symbol = symbolFromCanonicalSymbol(canonicalSymbol);
   return [
     {
       kind: "candle",
       candle: {
-        symbol: "BTC",
-        canonical_symbol: "BTC-PERP",
+        symbol,
+        canonical_symbol: canonicalSymbol,
         source: "hyperliquid",
         venue: "hyperliquid",
         interval: "15m",
@@ -2216,8 +2550,8 @@ function sampleStrategyMarketEvents(): StrategyMarketEvent[] {
     {
       kind: "candle",
       candle: {
-        symbol: "BTC",
-        canonical_symbol: "BTC-PERP",
+        symbol,
+        canonical_symbol: canonicalSymbol,
         source: "hyperliquid",
         venue: "hyperliquid",
         interval: "15m",
@@ -2236,8 +2570,8 @@ function sampleStrategyMarketEvents(): StrategyMarketEvent[] {
     {
       kind: "candle",
       candle: {
-        symbol: "BTC",
-        canonical_symbol: "BTC-PERP",
+        symbol,
+        canonical_symbol: canonicalSymbol,
         source: "hyperliquid",
         venue: "hyperliquid",
         interval: "15m",
@@ -2254,6 +2588,12 @@ function sampleStrategyMarketEvents(): StrategyMarketEvent[] {
       }
     }
   ];
+}
+
+function symbolFromCanonicalSymbol(canonicalSymbol: string): string {
+  return canonicalSymbol.endsWith("-PERP")
+    ? canonicalSymbol.slice(0, -"PERP".length - 1)
+    : canonicalSymbol;
 }
 
 function fakePiChatEvents(options: { finalOnly: boolean }) {

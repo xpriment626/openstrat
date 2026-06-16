@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   ensureOpenStratHome,
   getPiAuthPath,
+  projectObjectRef,
+  projectObjectRoot,
   registerProject,
   resolveOpenStratHome,
   safePurgeOpenStratHome
@@ -41,6 +43,31 @@ describe("OpenStrat local home", () => {
     expect(JSON.parse(readFileSync(first.ref, "utf8"))).toMatchObject({
       cwd: project
     });
+  });
+
+  it("derives project-scoped object refs from the registered cwd", () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
+    const home = resolveOpenStratHome({ userHome });
+    ensureOpenStratHome(home);
+
+    const registration = registerProject(home, project);
+
+    expect(projectObjectRoot(registration)).toBe(`projects/${registration.id}`);
+    expect(
+      projectObjectRef(
+        registration,
+        "workbench",
+        "strategy-validations",
+        "local_strategy",
+        "result.json"
+      )
+    ).toBe(
+      `projects/${registration.id}/workbench/strategy-validations/local_strategy/result.json`
+    );
+    expect(() => projectObjectRef(registration, "..", "escape.json")).toThrow(
+      /Invalid project object ref segment/
+    );
   });
 
   it("purges only a safe dev-v0 tree under .openstrat", () => {

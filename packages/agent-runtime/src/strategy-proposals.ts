@@ -1,4 +1,5 @@
 import {
+  ObjectRefSchema,
   StrategyPatchProposalSchema,
   type StrategyPatchProposal
 } from "@openstrat/domain";
@@ -15,6 +16,7 @@ export class NativeMutationBlockedError extends Error {
 
 export interface StrategyProposalWorkflowDependencies {
   events: EventLogRepository;
+  object_ref_root?: string;
   objects: ObjectStore;
   now?: () => string;
 }
@@ -47,6 +49,9 @@ export function createStrategyProposalWorkflow(
   dependencies: StrategyProposalWorkflowDependencies
 ): StrategyProposalWorkflow {
   const now = dependencies.now ?? (() => new Date().toISOString());
+  const objectRefRoot = dependencies.object_ref_root
+    ? objectRefRootFor(dependencies.object_ref_root)
+    : undefined;
 
   return {
     capturePatchBundle(input) {
@@ -60,16 +65,20 @@ export function createStrategyProposalWorkflow(
 
       const createdAt = now();
       const proposalId = proposalIdFor(input);
-      const patchRef = `scratch/${sanitizeRefSegment(
-        input.session_id
-      )}/strategy-patches/${proposalId}.bundle.json`;
+      const patchRef = prefixObjectRef(
+        objectRefRoot,
+        `scratch/${sanitizeRefSegment(
+          input.session_id
+        )}/strategy-patches/${proposalId}.bundle.json`
+      );
       const testsRef = containsTestFile(input.files) ? `${patchRef}#tests` : undefined;
       const artifactRef = {
         id: `${proposalId}_artifact`,
         kind: "proposal",
-        uri: `agent-artifacts/${sanitizeRefSegment(
-          input.session_id
-        )}/${proposalId}.json`,
+        uri: prefixObjectRef(
+          objectRefRoot,
+          `agent-artifacts/${sanitizeRefSegment(input.session_id)}/${proposalId}.json`
+        ),
         content_hash: `sha256:${proposalId}`,
         created_at: createdAt,
         append_only: true,
@@ -178,4 +187,16 @@ function sanitizeRefSegment(value: string): string {
 
 function streamId(sessionId: string): string {
   return `agent_sessions/${sessionId}`;
+}
+
+function objectRefRootFor(root: string): string {
+  const parsed = ObjectRefSchema.parse(root.replace(/\/+$/u, ""));
+  if (parsed.startsWith("agent-artifacts/") || parsed.startsWith("scratch/")) {
+    throw new Error(`Object ref root must not be a proposal root: ${root}`);
+  }
+  return parsed;
+}
+
+function prefixObjectRef(root: string | undefined, ref: string): string {
+  return root ? `${root}/${ref}` : ref;
 }

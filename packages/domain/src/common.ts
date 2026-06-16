@@ -54,7 +54,8 @@ export function isObjectRef(value: string): boolean {
 export function isProposalObjectRef(value: string): boolean {
   return (
     isSafeObjectRef(value) &&
-    PROPOSAL_OBJECT_REF_PREFIXES.some((prefix) => value.startsWith(prefix))
+    (PROPOSAL_OBJECT_REF_PREFIXES.some((prefix) => value.startsWith(prefix)) ||
+      isProjectScopedProposalObjectRef(value))
   );
 }
 
@@ -75,5 +76,14 @@ function isSafeObjectRef(value: string): boolean {
   const segments = value.split("/");
   return segments.every(
     (segment) => segment.length > 0 && segment !== "." && segment !== ".."
+  );
+}
+
+function isProjectScopedProposalObjectRef(value: string): boolean {
+  const segments = value.split("/");
+  return (
+    segments[0] === "projects" &&
+    (segments[2] === "agent-artifacts" || segments[2] === "scratch") &&
+    segments.length > 3
   );
 }

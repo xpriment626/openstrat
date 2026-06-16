@@ -86,6 +86,22 @@ export function getPiAuthPath(home: OpenStratHome): string {
   return join(home.authDir, "pi-auth.json");
 }
 
+export function projectObjectRoot(registration: ProjectRegistration): string {
+  return `projects/${projectObjectSegment(registration.id)}`;
+}
+
+export function projectObjectRef(
+  registration: ProjectRegistration,
+  ...segments: string[]
+): string {
+  if (segments.length === 0) {
+    throw new Error("Project object ref requires at least one segment");
+  }
+  return [projectObjectRoot(registration), ...segments.map(projectObjectSegment)].join(
+    "/"
+  );
+}
+
 export function registerProject(
   home: OpenStratHome,
   cwdInput: string
@@ -150,4 +166,18 @@ function assertSafePurgePath(pathInput: string): void {
 
 function projectIdFor(cwd: string): string {
   return Buffer.from(cwd).toString("base64url").slice(0, 32);
+}
+
+function projectObjectSegment(segment: string): string {
+  if (
+    segment.length === 0 ||
+    segment === "." ||
+    segment === ".." ||
+    segment.includes("/") ||
+    segment.includes("\\") ||
+    segment.includes("\0")
+  ) {
+    throw new Error(`Invalid project object ref segment: ${segment}`);
+  }
+  return segment;
 }

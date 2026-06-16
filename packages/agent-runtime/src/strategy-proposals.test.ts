@@ -80,6 +80,34 @@ describe("strategy proposal workflow", () => {
     });
   });
 
+  it("can scope strategy patch proposal refs under a project object namespace", () => {
+    const objects = new MemoryObjectStore();
+    const events = new SqliteEventLog(":memory:");
+    const workflow = createStrategyProposalWorkflow({
+      events,
+      object_ref_root: "projects/project_001",
+      objects,
+      now: () => now
+    });
+
+    const proposal = workflow.capturePatchBundle({
+      session_id: "agent_session_001",
+      turn_id: "turn_001",
+      strategy_id: "eth_breakout",
+      rationale: "Try project-scoped scratch storage.",
+      files: [{ path: "src/strategy.ts", content: "export default {};\n" }]
+    });
+
+    expect(proposal.patch_ref).toContain(
+      "projects/project_001/scratch/agent_session_001"
+    );
+    expect(proposal.artifact_ref.uri).toContain(
+      "projects/project_001/agent-artifacts/agent_session_001"
+    );
+    expect(objects.exists(proposal.patch_ref)).toBe(true);
+    expect(objects.exists(proposal.artifact_ref.uri)).toBe(true);
+  });
+
   it("does not mutate approved strategy manifests when capturing proposals", () => {
     const objects = new MemoryObjectStore();
     const events = new SqliteEventLog(":memory:");

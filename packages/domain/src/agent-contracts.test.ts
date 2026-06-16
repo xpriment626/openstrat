@@ -344,6 +344,16 @@ describe("agent domain contracts", () => {
       ProposalObjectRefSchema.safeParse("scratch/session/patch.bundle.json").success
     ).toBe(true);
     expect(
+      ProposalObjectRefSchema.safeParse(
+        "projects/project_001/agent-artifacts/session/p1.json"
+      ).success
+    ).toBe(true);
+    expect(
+      ProposalObjectRefSchema.safeParse(
+        "projects/project_001/scratch/session/patch.bundle.json"
+      ).success
+    ).toBe(true);
+    expect(
       CanonicalObjectRefSchema.safeParse("backtests/run_001/report.json").success
     ).toBe(true);
 
@@ -366,7 +376,15 @@ describe("agent domain contracts", () => {
     expect(
       CanonicalObjectRefSchema.safeParse("agent-artifacts/session/p1.json").success
     ).toBe(false);
+    expect(
+      CanonicalObjectRefSchema.safeParse(
+        "projects/project_001/agent-artifacts/session/p1.json"
+      ).success
+    ).toBe(false);
     expect(isProposalObjectRef("scratch/session/patch.bundle.json")).toBe(true);
+    expect(
+      isProposalObjectRef("projects/project_001/scratch/session/patch.bundle.json")
+    ).toBe(true);
     expect(isCanonicalObjectRef("datasets/hyperliquid/BTC-PERP/day.json")).toBe(true);
   });
 

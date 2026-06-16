@@ -101,6 +101,109 @@ describe("openstrat CLI commands", () => {
     expect(doctor.stdout.join("\n")).not.toContain("fake-refresh-token");
   });
 
+  it("scaffolds a local strategy workbench and stores validation artifacts under the project namespace", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = {
+      HOME: userHome,
+      OPENSTRAT_FAKE_CODEX_AUTH: "1",
+      OPENSTRAT_FAKE_HYPERLIQUID: "1",
+      OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
+    };
+
+    const init = await runOpenStratCli({ argv: ["init"], cwd, env });
+    const auth = await runOpenStratCli({ argv: ["auth", "codex"], cwd, env });
+    const doctor = await runOpenStratCli({ argv: ["doctor"], cwd, env });
+    const strategyInit = await runOpenStratCli({
+      argv: [
+        "strategy",
+        "init",
+        "--strategy-id",
+        "local_btc_breakout",
+        "--symbol",
+        "BTC-PERP",
+        "--interval",
+        "15m"
+      ],
+      cwd,
+      env
+    });
+    const ingest = await runOpenStratCli({
+      argv: ["market", "ingest-fixture", "--symbol", "BTC", "--interval", "15m"],
+      cwd,
+      env
+    });
+    const datasetRef = lineValue(ingest.stdout, "dataset: ");
+    const validate = await runOpenStratCli({
+      argv: [
+        "strategy",
+        "validate",
+        "--manifest",
+        "openstrat.strategy.json",
+        "--dataset-ref",
+        datasetRef,
+        "--as-of",
+        "2026-06-04T00:00:00.000Z"
+      ],
+      cwd,
+      env
+    });
+
+    const authPath = join(userHome, ".openstrat", "dev-v0", "auth", "pi-auth.json");
+    const manifestPath = join(cwd, "openstrat.strategy.json");
+    const sourcePath = join(cwd, "strategies", "local_btc_breakout.ts");
+    const projectId = lineValue(strategyInit.stdout, "project: ");
+    const projectRoot = lineValue(strategyInit.stdout, "project_objects: ");
+    const validationRef = lineValue(validate.stdout, "validation: ");
+    const validation = JSON.parse(
+      readFileSync(
+        join(userHome, ".openstrat", "dev-v0", "objects", validationRef),
+        "utf8"
+      )
+    ) as {
+      dataset_preflight?: {
+        dataset_ref: string;
+        validation: { missing_requirements: string[]; valid: boolean };
+      };
+      project: { cwd: string; id: string; object_root: string };
+      strategy: { strategy_id: string };
+      validation_ref: string;
+    };
+
+    expect(init.exitCode).toBe(0);
+    expect(auth.exitCode).toBe(0);
+    expect(doctor.stdout.join("\n")).toContain("Codex auth: configured");
+    expect(strategyInit.exitCode).toBe(0);
+    expect(validate.exitCode).toBe(0);
+    expect(existsSync(authPath)).toBe(true);
+    expect(existsSync(manifestPath)).toBe(true);
+    expect(existsSync(sourcePath)).toBe(true);
+    expect(existsSync(join(cwd, ".openstrat"))).toBe(false);
+    expect(projectRoot).toBe(`projects/${projectId}`);
+    expect(validationRef).toContain(
+      `${projectRoot}/workbench/strategy-validations/local_btc_breakout/`
+    );
+    expect(validate.stdout.join("\n")).toContain(
+      `home: ${join(userHome, ".openstrat", "dev-v0")}`
+    );
+    expect(validate.stdout.join("\n")).toContain(`project: ${projectId}`);
+    expect(validation).toMatchObject({
+      dataset_preflight: {
+        dataset_ref: datasetRef,
+        validation: { missing_requirements: [], valid: true }
+      },
+      project: {
+        cwd,
+        id: projectId,
+        object_root: projectRoot
+      },
+      strategy: {
+        strategy_id: "local_btc_breakout"
+      },
+      validation_ref: validationRef
+    });
+  });
+
   it("prints final assistant text when Pi does not stream text deltas", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
@@ -455,6 +558,9 @@ describe("openstrat CLI commands", () => {
     const patchRef = proposal.stdout
       .find((line) => line.startsWith("patch: "))
       ?.replace("patch: ", "");
+    const proposalProjectRoot = proposal.stdout
+      .find((line) => line.startsWith("project_objects: "))
+      ?.replace("project_objects: ", "");
 
     expect(valid.exitCode).toBe(0);
     expect(valid.stdout.join("\n")).toContain(
@@ -463,8 +569,9 @@ describe("openstrat CLI commands", () => {
     expect(invalid.exitCode).toBe(1);
     expect(invalid.stderr.join("\n")).toContain("forbidden API");
     expect(proposal.exitCode).toBe(0);
-    expect(artifactRef).toContain("agent-artifacts/");
-    expect(patchRef).toContain("scratch/");
+    expect(proposalProjectRoot).toMatch(/^projects\//);
+    expect(artifactRef).toContain(`${proposalProjectRoot}/agent-artifacts/`);
+    expect(patchRef).toContain(`${proposalProjectRoot}/scratch/`);
 
     const proposalArtifact = JSON.parse(
       readFileSync(
