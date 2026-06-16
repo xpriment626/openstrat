@@ -32,7 +32,31 @@ function parseCliJson(lines: readonly string[]): CliJsonEnvelope {
   return JSON.parse(lines[0] ?? "{}") as CliJsonEnvelope;
 }
 
+function projectOpenStratRoot(cwd: string): string {
+  return join(cwd, ".openstrat");
+}
+
 describe("openstrat CLI commands", () => {
+  it("initializes project-local OpenStrat state in cwd/.openstrat", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const env = {
+      HOME: userHome,
+      OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
+    };
+
+    const init = await runOpenStratCli({ argv: ["init"], cwd, env });
+    const home = projectOpenStratRoot(cwd);
+
+    expect(init.exitCode).toBe(0);
+    expect(init.stdout.join("\n")).toContain(`OpenStrat home: ${home}`);
+    expect(existsSync(join(home, "config.json"))).toBe(true);
+    expect(existsSync(join(home, "state.sqlite"))).toBe(true);
+    expect(existsSync(join(home, "objects"))).toBe(true);
+    expect(existsSync(join(home, "projects"))).toBe(true);
+    expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
+  });
+
   it("initializes, doctors, runs fake chat, lists artifacts, upgrades dry-run, and purges", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
@@ -91,7 +115,7 @@ describe("openstrat CLI commands", () => {
 
     const auth = await runOpenStratCli({ argv: ["auth", "codex"], cwd, env });
     const doctor = await runOpenStratCli({ argv: ["doctor"], cwd, env });
-    const authPath = join(userHome, ".openstrat", "dev-v0", "auth", "pi-auth.json");
+    const authPath = join(projectOpenStratRoot(cwd), "auth", "pi-auth.json");
 
     expect(auth.stdout.join("\n")).toContain("openai-codex");
     expect(existsSync(authPath)).toBe(true);
@@ -149,17 +173,14 @@ describe("openstrat CLI commands", () => {
       env
     });
 
-    const authPath = join(userHome, ".openstrat", "dev-v0", "auth", "pi-auth.json");
+    const authPath = join(projectOpenStratRoot(cwd), "auth", "pi-auth.json");
     const manifestPath = join(cwd, "openstrat.strategy.json");
     const sourcePath = join(cwd, "strategies", "local_btc_breakout.ts");
     const projectId = lineValue(strategyInit.stdout, "project: ");
     const projectRoot = lineValue(strategyInit.stdout, "project_objects: ");
     const validationRef = lineValue(validate.stdout, "validation: ");
     const validation = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", validationRef),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", validationRef), "utf8")
     ) as {
       dataset_preflight?: {
         dataset_ref: string;
@@ -178,14 +199,13 @@ describe("openstrat CLI commands", () => {
     expect(existsSync(authPath)).toBe(true);
     expect(existsSync(manifestPath)).toBe(true);
     expect(existsSync(sourcePath)).toBe(true);
-    expect(existsSync(join(cwd, ".openstrat"))).toBe(false);
+    expect(existsSync(projectOpenStratRoot(cwd))).toBe(true);
+    expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
     expect(projectRoot).toBe(`projects/${projectId}`);
     expect(validationRef).toContain(
       `${projectRoot}/workbench/strategy-validations/local_btc_breakout/`
     );
-    expect(validate.stdout.join("\n")).toContain(
-      `home: ${join(userHome, ".openstrat", "dev-v0")}`
-    );
+    expect(validate.stdout.join("\n")).toContain(`home: ${projectOpenStratRoot(cwd)}`);
     expect(validate.stdout.join("\n")).toContain(`project: ${projectId}`);
     expect(validation).toMatchObject({
       dataset_preflight: {
@@ -271,9 +291,7 @@ describe("openstrat CLI commands", () => {
     const binding = JSON.parse(
       readFileSync(
         join(
-          userHome,
-          ".openstrat",
-          "dev-v0",
+          projectOpenStratRoot(cwd),
           "agent-runtime",
           "codex-app-server-bindings",
           `${sessionId}.json`
@@ -286,9 +304,7 @@ describe("openstrat CLI commands", () => {
       transcript_ref: transcriptRef
     });
 
-    const events = new SqliteEventLog(
-      join(userHome, ".openstrat", "dev-v0", "state.sqlite")
-    );
+    const events = new SqliteEventLog(join(projectOpenStratRoot(cwd), "state.sqlite"));
     expect(
       events.list(`agent_sessions/${sessionId}`).map((event) => event.type)
     ).toEqual(expect.arrayContaining(["agent.runtime.session_resumed"]));
@@ -317,10 +333,7 @@ describe("openstrat CLI commands", () => {
     expect(datasetRef).toBeDefined();
 
     const dataset = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", datasetRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", datasetRef ?? ""), "utf8")
     ) as {
       canonical_symbol: string;
       dataset_ref: string;
@@ -575,15 +588,12 @@ describe("openstrat CLI commands", () => {
 
     const proposalArtifact = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", artifactRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", artifactRef ?? ""),
         "utf8"
       )
     ) as { id: string; patch_ref: string; status: string };
     const patchBundle = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", patchRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", patchRef ?? ""), "utf8")
     ) as { files: { path: string; content: string }[] };
 
     expect(proposalArtifact).toMatchObject({
@@ -636,20 +646,14 @@ describe("openstrat CLI commands", () => {
     expect(ledgerRef).toContain("trade-ledger.json");
 
     const report = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", reportRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", reportRef ?? ""), "utf8")
     ) as {
       dataset_ref: string;
       metrics: { fees_usd: number; slippage_usd: number; trades: number };
       trade_ledger_ref: string;
     };
     const ledger = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", ledgerRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", ledgerRef ?? ""), "utf8")
     ) as unknown[];
 
     expect(report.dataset_ref).toBe(datasetRef);
@@ -827,7 +831,7 @@ describe("openstrat CLI commands", () => {
 
     const readyArtifact = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", readyArtifactRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", readyArtifactRef ?? ""),
         "utf8"
       )
     ) as {
@@ -1002,7 +1006,7 @@ describe("openstrat CLI commands", () => {
 
     const decisionArtifact = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", decisionRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", decisionRef ?? ""),
         "utf8"
       )
     ) as {
@@ -1011,10 +1015,7 @@ describe("openstrat CLI commands", () => {
       tags: string[];
     };
     const memoryArtifact = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", memoryRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", memoryRef ?? ""), "utf8")
     ) as {
       evidence_refs: string[];
       promotion_event_ref?: string;
@@ -1042,9 +1043,7 @@ describe("openstrat CLI commands", () => {
     );
     expect(memoryArtifact.promotion_event_ref).toBeUndefined();
 
-    const events = new SqliteEventLog(
-      join(userHome, ".openstrat", "dev-v0", "state.sqlite")
-    );
+    const events = new SqliteEventLog(join(projectOpenStratRoot(cwd), "state.sqlite"));
     try {
       const storedEvents = events.list();
       expect(storedEvents.map((event) => event.type)).toEqual(
@@ -1190,7 +1189,7 @@ describe("openstrat CLI commands", () => {
 
     const localManifest = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", localManifestRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", localManifestRef ?? ""),
         "utf8"
       )
     ) as {
@@ -1200,7 +1199,7 @@ describe("openstrat CLI commands", () => {
     };
     const localPlan = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", localPlanRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", localPlanRef ?? ""),
         "utf8"
       )
     ) as {
@@ -1210,7 +1209,7 @@ describe("openstrat CLI commands", () => {
     };
     const localHandoffArtifact = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", localHandoffRef ?? ""),
+        join(projectOpenStratRoot(cwd), "objects", localHandoffRef ?? ""),
         "utf8"
       )
     ) as {
@@ -1220,7 +1219,7 @@ describe("openstrat CLI commands", () => {
     };
     const strategyManifest = JSON.parse(
       readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", strategyManifestRef),
+        join(projectOpenStratRoot(cwd), "objects", strategyManifestRef),
         "utf8"
       )
     ) as { strategy_id: string };
@@ -1281,10 +1280,7 @@ describe("openstrat CLI commands", () => {
       .find((line) => line.startsWith("plan: "))
       ?.replace("plan: ", "");
     const flyPlan = JSON.parse(
-      readFileSync(
-        join(userHome, ".openstrat", "dev-v0", "objects", flyPlanRef ?? ""),
-        "utf8"
-      )
+      readFileSync(join(projectOpenStratRoot(cwd), "objects", flyPlanRef ?? ""), "utf8")
     ) as {
       remote: boolean;
       required_cli: string;

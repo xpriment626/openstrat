@@ -23,6 +23,7 @@ export interface OpenStratHome {
 }
 
 export interface ResolveOpenStratHomeOptions {
+  cwd?: string;
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   userHome?: string;
 }
@@ -42,8 +43,8 @@ export function resolveOpenStratHome(
   options: ResolveOpenStratHomeOptions = {}
 ): OpenStratHome {
   const env = options.env ?? process.env;
-  const baseHome = resolve(options.userHome ?? env.HOME ?? homedir());
-  const root = resolve(env.OPENSTRAT_HOME ?? join(baseHome, ".openstrat", "dev-v0"));
+  const projectRoot = resolve(options.cwd ?? process.cwd());
+  const root = resolve(env.OPENSTRAT_HOME ?? join(projectRoot, ".openstrat"));
   return {
     root,
     configPath: join(root, "config.json"),
@@ -73,7 +74,7 @@ export function ensureOpenStratHome(home: OpenStratHome): void {
   if (!existsSync(home.configPath)) {
     writeFileSync(
       home.configPath,
-      `${JSON.stringify({ version: 1, epoch: "dev-v0" }, null, 2)}\n`,
+      `${JSON.stringify({ version: 1, epoch: "project-v0" }, null, 2)}\n`,
       "utf8"
     );
   }
@@ -152,12 +153,18 @@ export function safePurgeOpenStratHome(home: OpenStratHome): PurgeResult {
 function assertSafePurgePath(pathInput: string): void {
   const path = resolve(pathInput);
   const parent = basename(resolve(path, ".."));
-  if (basename(path) !== "dev-v0" || parent !== ".openstrat") {
+  const projectLocalHome = basename(path) === ".openstrat";
+  const legacyDevHome = basename(path) === "dev-v0" && parent === ".openstrat";
+  if (!projectLocalHome && !legacyDevHome) {
+    throw new Error(`Refusing to purge unsafe OpenStrat home: ${path}`);
+  }
+  if (path === join(homedir(), ".openstrat")) {
     throw new Error(`Refusing to purge unsafe OpenStrat home: ${path}`);
   }
   const fromHome = relative(homedir(), path);
   if (fromHome === "" || fromHome.startsWith("..")) {
-    const fromConfiguredRoot = path.includes(`${".openstrat"}/dev-v0`);
+    const fromConfiguredRoot =
+      path.includes(`${".openstrat"}/dev-v0`) || path.endsWith(`${"/.openstrat"}`);
     if (!fromConfiguredRoot) {
       throw new Error(`Refusing to purge unsafe OpenStrat home: ${path}`);
     }

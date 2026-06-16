@@ -31,6 +31,12 @@ openstrat reset --purge
 openstrat doctor
 ```
 
+By default, `openstrat init` creates the active runtime home at
+`<project>/.openstrat`. Auth, objects, datasets, event logs, transcripts, and
+project artifacts for that strategy workspace live there. Set `OPENSTRAT_HOME`
+only when you intentionally want to override the project-local home, such as in
+hermetic tests.
+
 Machine-readable output:
 
 ```bash
@@ -53,8 +59,8 @@ openstrat market snapshot HYPE-PERP --json
 ```
 
 `ingest-live` is read-only, opt-in, and guarded by `--confirm-live`. It writes
-local runtime artifacts under the active OpenStrat home; it is not required for
-the fixture-backed test suite.
+local runtime artifacts under the active project `.openstrat` home; it is not
+required for the fixture-backed test suite.
 
 ## Agent Runtime
 
@@ -64,7 +70,7 @@ the fixture-backed test suite.
 openstrat chat --prompt "Research BTC funding context."
 ```
 
-The Codex path stores OpenStrat-owned runtime state under the active
+The Codex path stores OpenStrat-owned runtime state under the active project
 `.openstrat` home:
 
 - `agent-runtime/codex-app-server-bindings/*.json` maps OpenStrat session ids to

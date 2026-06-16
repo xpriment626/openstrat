@@ -188,7 +188,7 @@ export async function runOpenStratCli(
   };
   const env = inputOptions.env ?? process.env;
   const cwd = inputOptions.cwd ?? process.cwd();
-  const home = resolveOpenStratHome({ env });
+  const home = resolveOpenStratHome({ cwd, env });
 
   try {
     if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {

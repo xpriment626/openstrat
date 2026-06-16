@@ -13,13 +13,18 @@ import {
 } from "./home.js";
 
 describe("OpenStrat local home", () => {
-  it("creates the dev-v0 state tree under the user's .openstrat directory", () => {
+  it("creates the state tree under the project .openstrat directory", () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
-    const home = resolveOpenStratHome({ userHome });
+    const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
+    const home = resolveOpenStratHome({ cwd: project, userHome });
 
     ensureOpenStratHome(home);
 
-    expect(home.root).toBe(join(userHome, ".openstrat", "dev-v0"));
+    expect(home.root).toBe(join(project, ".openstrat"));
+    expect(JSON.parse(readFileSync(home.configPath, "utf8"))).toMatchObject({
+      epoch: "project-v0",
+      version: 1
+    });
     expect(existsSync(home.configPath)).toBe(true);
     expect(existsSync(home.stateDbPath)).toBe(true);
     expect(existsSync(home.objectsDir)).toBe(true);
@@ -30,10 +35,24 @@ describe("OpenStrat local home", () => {
     expect(getPiAuthPath(home)).toBe(join(home.root, "auth", "pi-auth.json"));
   });
 
+  it("uses OPENSTRAT_HOME as an explicit override for tests and custom runtimes", () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
+    const override = join(userHome, "custom-openstrat-home");
+
+    const home = resolveOpenStratHome({
+      cwd: project,
+      env: { OPENSTRAT_HOME: override },
+      userHome
+    });
+
+    expect(home.root).toBe(override);
+  });
+
   it("registers projects idempotently", () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
-    const home = resolveOpenStratHome({ userHome });
+    const home = resolveOpenStratHome({ cwd: project, userHome });
     ensureOpenStratHome(home);
 
     const first = registerProject(home, project);
@@ -48,7 +67,7 @@ describe("OpenStrat local home", () => {
   it("derives project-scoped object refs from the registered cwd", () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
-    const home = resolveOpenStratHome({ userHome });
+    const home = resolveOpenStratHome({ cwd: project, userHome });
     ensureOpenStratHome(home);
 
     const registration = registerProject(home, project);
@@ -70,9 +89,10 @@ describe("OpenStrat local home", () => {
     );
   });
 
-  it("purges only a safe dev-v0 tree under .openstrat", () => {
+  it("purges only a safe project .openstrat tree", () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
-    const home = resolveOpenStratHome({ userHome });
+    const project = mkdtempSync(join(tmpdir(), "openstrat-project-"));
+    const home = resolveOpenStratHome({ cwd: project, userHome });
     ensureOpenStratHome(home);
 
     const result = safePurgeOpenStratHome(home);
@@ -82,7 +102,7 @@ describe("OpenStrat local home", () => {
     expect(() =>
       safePurgeOpenStratHome({
         ...home,
-        root: join(userHome, "not-openstrat", "dev-v0")
+        root: join(userHome, "not-openstrat")
       })
     ).toThrow(/Refusing to purge unsafe OpenStrat home/);
   });
