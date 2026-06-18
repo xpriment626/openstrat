@@ -99,6 +99,31 @@ describe("openstrat CLI commands", () => {
     expect(workbench.stdout.join("\n")).toContain("Hello from OpenStrat.");
     expect(workbench.stdout.join("\n")).toContain("runtime: pi");
     expect(workbench.stdout.join("\n")).not.toContain("runtime: codex_app_server");
+
+    const home = projectOpenStratRoot(cwd);
+    const sessionId = lineValue(workbench.stdout, "session: ");
+    const transcriptRef = lineValue(workbench.stdout, "transcript: ");
+    const summaryRef = lineValue(workbench.stdout, "session_summary: ");
+    const statusRef = lineValue(workbench.stdout, "project_status: ");
+    const summary = JSON.parse(
+      readFileSync(join(home, "objects", summaryRef), "utf8")
+    ) as {
+      session_id: string;
+      next_action: string;
+      source_refs: string[];
+    };
+    const status = JSON.parse(
+      readFileSync(join(home, "objects", statusRef), "utf8")
+    ) as {
+      latest: {
+        workbench_session_summary_ref?: string;
+      };
+    };
+
+    expect(summary.session_id).toBe(sessionId);
+    expect(summary.next_action).toBe("continue_in_workbench");
+    expect(summary.source_refs).toContain(transcriptRef);
+    expect(status.latest.workbench_session_summary_ref).toBe(summaryRef);
   });
 
   it("creates a strategy project scaffold with project-local storage and deployment policy", async () => {

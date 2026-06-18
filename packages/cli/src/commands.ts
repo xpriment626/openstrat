@@ -42,6 +42,7 @@ import {
   OrderbookSnapshotSchema,
   RiskReviewSchema,
   StrategyManifestSchema,
+  WorkbenchSessionSummarySchema,
   type AgentResultEnvelope,
   type BacktestReport,
   type BotRunManifest,
@@ -235,6 +236,7 @@ interface ProjectStatusSnapshot {
     gate_artifact_ref?: string;
     transcript_ref?: string;
     chat_session_id?: string;
+    workbench_session_summary_ref?: string;
     export_manifest_path?: string;
   };
   counts: {
@@ -243,6 +245,7 @@ interface ProjectStatusSnapshot {
     backtests: number;
     gates: number;
     chat_sessions: number;
+    session_summaries: number;
     exports: number;
   };
   status_ref: string;
@@ -2620,14 +2623,23 @@ async function commandPiChat(
     .filter((event) => event.type === "agent.runtime.message_delta")
     .map((event) => (event.payload as { delta?: string }).delta ?? "")
     .join("");
-  options.emitOut(
-    deltas ||
-      finalAssistantTextFromStream(stream) ||
-      "OpenStrat chat session completed."
-  );
+  const assistantText =
+    deltas || finalAssistantTextFromStream(stream) || "OpenStrat chat session completed.";
+  const summaryRefs = writeWorkbenchSessionSummary({
+    assistantText,
+    createdAt,
+    cwd: options.cwd,
+    home: options.home,
+    prompt,
+    sessionId,
+    transcriptRef: runtime.transcript_ref
+  });
+  options.emitOut(assistantText);
   options.emitOut("runtime: pi");
   options.emitOut(`session: ${sessionId}`);
   options.emitOut(`transcript: ${runtime.transcript_ref}`);
+  options.emitOut(`session_summary: ${summaryRefs.summary_ref}`);
+  options.emitOut(`project_status: ${summaryRefs.project_status_ref}`);
   options.emitOut(`disabled native tools: ${runtime.disabled_builtin_tools.join(",")}`);
   events.close();
 }
@@ -2729,6 +2741,77 @@ function createWorkbenchRiskPolicyEngine(now: () => string): RiskPolicyEngine {
   };
 }
 
+function writeWorkbenchSessionSummary(input: {
+  assistantText: string;
+  createdAt: string;
+  cwd: string;
+  home: OpenStratHome;
+  prompt: string;
+  sessionId: string;
+  transcriptRef: string;
+}): { project_status_ref: string; summary_ref: string } {
+  const registration = registerProject(input.home, input.cwd);
+  const store = new FileObjectStore(input.home.objectsDir);
+  const status = buildProjectStatus(input.home, input.cwd, {
+    chat_session_id: input.sessionId,
+    transcript_ref: input.transcriptRef
+  });
+  const selectedDataset = status.latest.dataset_ref
+    ? safeGetJson<MarketDatasetManifest>(store, status.latest.dataset_ref)
+    : undefined;
+  const summaryRef = projectObjectRef(
+    registration,
+    "workbench",
+    "session-summaries",
+    `${safeRefSegment(input.sessionId)}.json`
+  );
+  const summary = WorkbenchSessionSummarySchema.parse({
+    id: `workbench_summary_${safeRefSegment(input.sessionId)}`,
+    session_id: input.sessionId,
+    created_at: input.createdAt,
+    updated_at: new Date().toISOString(),
+    ...(status.latest.dataset_ref
+      ? { selected_dataset_ref: status.latest.dataset_ref }
+      : {}),
+    ...(selectedDataset?.canonical_symbol
+      ? { selected_symbol: selectedDataset.canonical_symbol }
+      : {}),
+    strategy_thesis: input.prompt,
+    parameters: {
+      prompt: input.prompt,
+      assistant_text: input.assistantText,
+      runtime: "pi"
+    },
+    ...(status.latest.backtest_report_ref
+      ? { latest_backtest_report_ref: status.latest.backtest_report_ref }
+      : {}),
+    ...(status.latest.backtest_diagnostics_ref
+      ? { diagnostics_ref: status.latest.backtest_diagnostics_ref }
+      : {}),
+    rejected_ideas: [],
+    risk_blockers: [],
+    next_action: "continue_in_workbench",
+    source_refs: uniqueRefs(
+      [
+        input.transcriptRef,
+        status.status_ref,
+        status.latest.dataset_ref,
+        status.latest.strategy_validation_ref,
+        status.latest.backtest_report_ref,
+        status.latest.backtest_diagnostics_ref,
+        status.latest.gate_ref
+      ].filter((ref): ref is string => typeof ref === "string")
+    )
+  });
+  store.putJson(summaryRef, summary);
+  const projectStatusRef = writeProjectStatusArtifact(input.home, input.cwd, {
+    chat_session_id: input.sessionId,
+    transcript_ref: input.transcriptRef,
+    workbench_session_summary_ref: summaryRef
+  });
+  return { project_status_ref: projectStatusRef, summary_ref: summaryRef };
+}
+
 async function commandWorkbench(options: {
   argv: string[];
   cwd: string;
@@ -2769,6 +2852,9 @@ async function commandWorkbenchSession(options: {
 }): Promise<void> {
   ensureOpenStratHome(options.home);
   const prompt = await workbenchPromptFromArgs(options.argv, options.env);
+  if (!prompt.trim()) {
+    throw new Error("No prompt provided");
+  }
   emitWorkbenchSessionHeader(options.emitOut);
   if (prompt.trim().startsWith("/")) {
     await commandWorkbenchSlashCommand(options, prompt.trim());
@@ -3813,6 +3899,8 @@ function buildProjectStatus(
   const latestTranscript = latestChatSession
     ? chatSessions.find((session) => session.id === latestChatSession)
     : undefined;
+  const summaryRefs = listObjectRefs(home, `${objectRoot}/workbench/session-summaries`);
+  const latestSummaryRef = latestRef(summaryRefs);
   const exportManifests = listExportManifestPaths(home);
 
   const latest: ProjectStatusSnapshot["latest"] = {
@@ -3851,6 +3939,9 @@ function buildProjectStatus(
           transcript_ref: latestTranscript.transcript_ref
         }
       : {}),
+    ...(latestSummaryRef
+      ? { workbench_session_summary_ref: latestSummaryRef }
+      : {}),
     ...optionalLatestRef("export_manifest_path", latestRef(exportManifests)),
     ...latestOverrides
   };
@@ -3876,6 +3967,7 @@ function buildProjectStatus(
       backtests: backtestReportRefs.length,
       gates: gateArtifactRefs.length,
       chat_sessions: chatSessions.length,
+      session_summaries: summaryRefs.length,
       exports: exportManifests.length
     },
     status_ref: projectObjectRef(registration, "status", "latest.json")
@@ -3911,6 +4003,7 @@ function projectStatusEvidenceRefs(
     status.latest.backtest_summary_ref,
     status.latest.gate_ref,
     status.latest.gate_artifact_ref,
+    status.latest.workbench_session_summary_ref,
     status.status_ref
   ].filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
   const reportRefs =
