@@ -203,6 +203,10 @@ interface ProjectStatusSnapshot {
     backtest_report_ref?: string;
     backtest_metrics_ref?: string;
     trade_ledger_ref?: string;
+    backtest_intent_ledger_ref?: string;
+    backtest_equity_curve_ref?: string;
+    backtest_diagnostics_ref?: string;
+    backtest_summary_ref?: string;
     gate_ref?: string;
     gate_artifact_ref?: string;
     transcript_ref?: string;
@@ -294,6 +298,9 @@ export async function runOpenStratCli(
 
     const command = argv.shift();
     switch (command) {
+      case "create":
+        await commandCreate({ argv, cwd, emitOut, env, setJsonData });
+        break;
       case "init":
         await commandInit({ cwd, emitOut, home });
         break;
@@ -312,6 +319,9 @@ export async function runOpenStratCli(
       case "market":
         await commandMarket({ argv, emitOut, env, home, setJsonData });
         break;
+      case "markets":
+        await commandMarkets({ argv, emitOut, env, home, setJsonData });
+        break;
       case "strategy":
         await commandStrategy({ argv, cwd, emitOut, home, setJsonData });
         break;
@@ -323,6 +333,9 @@ export async function runOpenStratCli(
         break;
       case "project":
         await commandProject({ argv, cwd, emitOut, home, setJsonData });
+        break;
+      case "workbench":
+        await commandWorkbench({ argv, cwd, emitOut, env, home, setJsonData });
         break;
       case "bundle":
         await commandBundle({ argv, cwd, emitOut, home, setJsonData });
@@ -519,6 +532,199 @@ async function commandInit(options: {
   );
 }
 
+async function commandCreate(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  const projectName = options.argv[0];
+  if (!projectName) {
+    throw new Error("Usage: openstrat create <project-name>");
+  }
+  const projectDir = resolveProjectCreatePath(options.cwd, projectName);
+  if (existsSync(projectDir)) {
+    throw new Error(
+      `Refusing to create project because path already exists: ${projectDir}`
+    );
+  }
+
+  mkdirSync(projectDir, { recursive: false });
+  const home = resolveOpenStratHome({ cwd: projectDir, env: options.env });
+  ensureOpenStratHome(home);
+  const registration = registerProject(home, projectDir);
+  const symbol = stringFlag(options.argv, "--symbol")?.toUpperCase() ?? "BTC-PERP";
+  const interval = stringFlag(options.argv, "--interval") ?? "15m";
+  const createdAt = new Date().toISOString();
+  createProjectScaffold({
+    createdAt,
+    interval,
+    projectDir,
+    projectName,
+    registration,
+    symbol
+  });
+
+  const objectRoot = projectObjectRoot(registration);
+  options.setJsonData({
+    command: "create",
+    project_dir: projectDir,
+    home: home.root,
+    project: registration,
+    project_object_root: objectRoot,
+    files: [
+      "openstrat.project.json",
+      "openstrat.strategy.json",
+      "openstrat.deploy.toml",
+      "src/strategy.ts",
+      "src/strategy.test.ts",
+      "examples/workbench-prompt.md"
+    ]
+  });
+  options.emitOut(`project_dir: ${projectDir}`);
+  options.emitOut(`home: ${home.root}`);
+  options.emitOut(`project: ${registration.id}`);
+  options.emitOut(`project_objects: ${objectRoot}`);
+  options.emitOut("initialized: yes");
+}
+
+function resolveProjectCreatePath(cwd: string, projectName: string): string {
+  if (
+    projectName.trim().length === 0 ||
+    projectName.includes("\0") ||
+    isAbsolute(projectName)
+  ) {
+    throw new Error(`Invalid project name: ${projectName}`);
+  }
+  const parent = resolve(cwd);
+  const projectDir = resolve(parent, projectName);
+  const fromParent = relative(parent, projectDir);
+  if (fromParent === "" || fromParent.startsWith("..") || isAbsolute(fromParent)) {
+    throw new Error("Project directory must stay inside the current directory");
+  }
+  return projectDir;
+}
+
+function createProjectScaffold(input: {
+  createdAt: string;
+  interval: string;
+  projectDir: string;
+  projectName: string;
+  registration: ReturnType<typeof registerProject>;
+  symbol: string;
+}): void {
+  const strategyId = safeRefSegment(input.projectName).replace(/-/gu, "_");
+  const manifest = StrategyManifestSchema.parse({
+    strategy_id: strategyId,
+    strategy_version: "0.1.0",
+    name: titleFromStrategyId(strategyId),
+    description: "Project-scoped OpenStrat strategy scaffold.",
+    runtime: "typescript",
+    entrypoint: "src/strategy.ts",
+    autonomy_mode: "strategy_workbench",
+    allowed_symbols: [input.symbol],
+    parameters: {
+      lookback_candles: 2,
+      target_notional_usd: 1000
+    },
+    required_data: [
+      {
+        kind: "candles",
+        canonical_symbol: input.symbol,
+        interval: input.interval
+      }
+    ],
+    output: "trade_intent",
+    created_at: input.createdAt,
+    source_refs: []
+  });
+
+  writeNewFile(
+    join(input.projectDir, "openstrat.project.json"),
+    `${JSON.stringify(
+      {
+        name: input.projectName,
+        created_at: input.createdAt,
+        openstrat_home: ".openstrat",
+        project_id: input.registration.id,
+        default_symbol: input.symbol,
+        default_interval: input.interval
+      },
+      null,
+      2
+    )}\n`
+  );
+  writeNewFile(
+    join(input.projectDir, "openstrat.strategy.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`
+  );
+  writeNewFile(
+    join(input.projectDir, "openstrat.deploy.toml"),
+    deploymentTomlTemplate(input.projectName)
+  );
+  writeNewFile(
+    join(input.projectDir, "src", "strategy.ts"),
+    workbenchStrategySource({
+      interval: input.interval,
+      strategyId,
+      symbol: input.symbol
+    })
+  );
+  writeNewFile(
+    join(input.projectDir, "src", "strategy.test.ts"),
+    `import { describe, expect, it } from "vitest";
+import { evaluate } from "./strategy.js";
+
+describe("strategy scaffold", () => {
+  it("exports a pure evaluator", () => {
+    expect(evaluate({ market_events: [] })).toEqual([]);
+  });
+});
+`
+  );
+  writeNewFile(
+    join(input.projectDir, "examples", "workbench-prompt.md"),
+    `Develop a volume and momentum based strategy that can run on the ${input.interval} timeframe for ${input.symbol}.
+`
+  );
+}
+
+function deploymentTomlTemplate(projectName: string): string {
+  const appName = safeRefSegment(projectName).toLowerCase().replace(/_/gu, "-");
+  return `[strategy]
+manifest = "openstrat.strategy.json"
+
+[deployment]
+target = "fly_machine"
+mode = "paper"
+heartbeat_interval_ms = 30000
+max_runtime_minutes = 720
+
+[deployment.fly]
+app_name = "${appName}"
+region = "iad"
+memory = "1gb"
+cpus = 1
+min_machines_running = 1
+
+[execution]
+venue = "hyperliquid"
+network = "mainnet"
+order_gateway = "openstrat.hyperliquid"
+
+[execution.builder_fee]
+required = true
+address = "0x0000000000000000000000000000000000000000"
+fee_tenths_bps = 10
+require_user_approval = true
+enforce_for_live_orders = true
+
+[secrets]
+hyperliquid_private_key = "FLY_SECRET:HYPERLIQUID_PRIVATE_KEY"
+`;
+}
+
 async function commandBacktest(options: {
   argv: string[];
   cwd: string;
@@ -672,6 +878,10 @@ async function commandBacktestRunLocal(options: {
     request_ref: requestRef,
     report_ref: reportRef,
     trade_ledger_ref: reportWithEvidence.trade_ledger_ref,
+    intent_ledger_ref: reportWithEvidence.intent_ledger_ref,
+    equity_curve_ref: reportWithEvidence.equity_curve_ref,
+    diagnostics_ref: reportWithEvidence.diagnostics_ref,
+    summary_ref: reportWithEvidence.summary_ref,
     metrics_ref: metricsRef,
     strategy_manifest_ref: strategyRefs.manifest_ref,
     strategy_source_ref: strategyRefs.source_ref,
@@ -682,6 +892,10 @@ async function commandBacktestRunLocal(options: {
   options.emitOut(`request: ${requestRef}`);
   options.emitOut(`report: ${reportRef}`);
   options.emitOut(`trade_ledger: ${reportWithEvidence.trade_ledger_ref}`);
+  options.emitOut(`intent_ledger: ${reportWithEvidence.intent_ledger_ref}`);
+  options.emitOut(`equity_curve: ${reportWithEvidence.equity_curve_ref}`);
+  options.emitOut(`diagnostics: ${reportWithEvidence.diagnostics_ref}`);
+  options.emitOut(`summary: ${reportWithEvidence.summary_ref}`);
   options.emitOut(`metrics: ${metricsRef}`);
   options.emitOut(`trades: ${reportWithEvidence.metrics.trades}`);
   options.emitOut(`project: ${registration.id}`);
@@ -733,6 +947,10 @@ async function commandBacktestRunSample(options: {
 
   options.emitOut(`report: ${reportRef}`);
   options.emitOut(`trade_ledger: ${report.trade_ledger_ref}`);
+  options.emitOut(`intent_ledger: ${report.intent_ledger_ref}`);
+  options.emitOut(`equity_curve: ${report.equity_curve_ref}`);
+  options.emitOut(`diagnostics: ${report.diagnostics_ref}`);
+  options.emitOut(`summary: ${report.summary_ref}`);
   options.emitOut(`trades: ${report.metrics.trades}`);
 }
 
@@ -1568,9 +1786,7 @@ async function loadLocalStrategy(
     manifest.entrypoint,
     "strategy entrypoint"
   );
-  const imported = (await import(
-    `${pathToFileURL(sourcePath).href}?openstrat=${Date.now()}`
-  )) as unknown;
+  const imported = await importLocalStrategyModule(sourcePath);
   const evaluate = strategyEvaluateFromModule(imported, manifest);
   return {
     manifest_path: manifestPath,
@@ -1580,6 +1796,19 @@ async function loadLocalStrategy(
       evaluate
     }
   };
+}
+
+async function importLocalStrategyModule(sourcePath: string): Promise<unknown> {
+  if (sourcePath.endsWith(".ts")) {
+    const source = readFileSync(sourcePath, "utf8");
+    const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString(
+      "base64"
+    )}#openstrat=${Date.now()}`;
+    return import(dataUrl) as Promise<unknown>;
+  }
+  return import(
+    `${pathToFileURL(sourcePath).href}?openstrat=${Date.now()}`
+  ) as Promise<unknown>;
 }
 
 function strategyEvaluateFromModule(
@@ -1642,11 +1871,75 @@ function assertNewFile(path: string): void {
 }
 
 function localStrategySource(strategyId: string): string {
-  return `export function evaluate(_input: unknown) {
+  return `export function evaluate(_input) {
   return [];
 }
 
 export const strategyId = ${JSON.stringify(strategyId)};
+`;
+}
+
+function workbenchStrategySource(input: {
+  interval: string;
+  strategyId: string;
+  symbol: string;
+}): string {
+  return `export function evaluate(input) {
+  const marketEvents = Array.isArray(input?.market_events) ? input.market_events : [];
+  const candles = marketEvents
+    .filter((event) => event.kind === "candle")
+    .map((event) => event.candle);
+  const lastCandle = candles.at(-1);
+  if (!lastCandle) {
+    return [];
+  }
+
+  const base = {
+    created_at: input.now,
+    created_by: {
+      strategy_id: ${JSON.stringify(input.strategyId)},
+      strategy_version: "0.1.0"
+    },
+    mode: input.mode,
+    canonical_symbol: ${JSON.stringify(input.symbol)},
+    target_notional_usd: 1000,
+    max_slippage_bps: 10,
+    reason_ref: input.decision_ref,
+    evidence_refs: [lastCandle.raw_ref ?? input.decision_ref],
+    risk_policy_ref: input.risk_policy_ref,
+    invalidation: {
+      thesis_invalid_if: ["volume and momentum evidence weakens"]
+    }
+  };
+
+  if (candles.length === 1) {
+    return [
+      {
+        ...base,
+        id: ${JSON.stringify(input.strategyId)} + ":open:" + lastCandle.close_time,
+        intent_type: "open_position",
+        side: "long"
+      }
+    ];
+  }
+
+  if (candles.length === 2) {
+    return [
+      {
+        ...base,
+        id: ${JSON.stringify(input.strategyId)} + ":close:" + lastCandle.close_time,
+        intent_type: "close_position",
+        side: "sell"
+      }
+    ];
+  }
+
+  return [];
+}
+
+export const strategyId = ${JSON.stringify(input.strategyId)};
+export const strategyName = "volume_momentum_strategy";
+export const timeframe = ${JSON.stringify(input.interval)};
 `;
 }
 
@@ -1692,6 +1985,146 @@ async function commandMarket(options: {
         "Usage: openstrat market <ingest-fixture|ingest-live|list|snapshot> [options]"
       );
   }
+}
+
+async function commandMarkets(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  const subcommand = options.argv.shift() ?? "list";
+  switch (subcommand) {
+    case "list": {
+      const markets = await availableHyperliquidPerpMarkets(options.env);
+      options.setJsonData({
+        command: "markets",
+        subcommand: "list",
+        source: "hyperliquid",
+        venue: "hyperliquid",
+        markets
+      });
+      for (const market of markets) {
+        options.emitOut(`${market.canonical_symbol} ${market.source} ${market.venue}`);
+      }
+      return;
+    }
+    case "ingest":
+      await commandMarketsIngest(options);
+      return;
+    default:
+      throw new Error("Usage: openstrat markets <list|ingest> [options]");
+  }
+}
+
+async function commandMarketsIngest(options: {
+  argv: string[];
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  if (!options.argv.includes("--confirm-selection")) {
+    throw new Error(
+      "Market ingestion requires --confirm-selection to confirm symbol, interval, and lookback"
+    );
+  }
+  const symbol = requiredFlag(options.argv, "--symbol").toUpperCase();
+  const coin = hyperliquidCoinFromSymbol(symbol);
+  const interval = CandleIntervalSchema.parse(
+    stringFlag(options.argv, "--interval") ?? "15m"
+  );
+  const lookbackMinutes = optionalNumberFlag(options.argv, "--lookback-minutes") ?? 60;
+  const endTimeMs = optionalNumberFlag(options.argv, "--end-time-ms") ?? Date.now();
+  const startTimeMs =
+    optionalNumberFlag(options.argv, "--start-time-ms") ??
+    endTimeMs - lookbackMinutes * 60_000;
+  const receivedAt =
+    stringFlag(options.argv, "--received-at") ?? new Date().toISOString();
+  if (startTimeMs >= endTimeMs) {
+    throw new Error("--start-time-ms must be before --end-time-ms");
+  }
+
+  const store = new FileObjectStore(options.home.objectsDir);
+  const client =
+    options.env.OPENSTRAT_FAKE_HYPERLIQUID === "1"
+      ? createFixtureHyperliquidClient(coin)
+      : new HyperliquidInfoClient();
+  const result = await ingestHyperliquidWindow({
+    client,
+    object_store: store,
+    coin,
+    interval,
+    start_time_ms: startTimeMs,
+    end_time_ms: endTimeMs,
+    received_at: receivedAt,
+    acquisition_method: "guarded_live"
+  });
+  const validation = validateMarketDataset(store, result.dataset_ref, {
+    as_of: receivedAt,
+    canonical_symbol: `${coin}-PERP`,
+    source: "hyperliquid",
+    venue: "hyperliquid",
+    required_families: [
+      "market_registry",
+      "mark_prices",
+      "candles",
+      "funding_rates",
+      "orderbook_snapshots"
+    ]
+  });
+
+  options.setJsonData({
+    command: "markets",
+    subcommand: "ingest",
+    dataset_ref: result.dataset_ref,
+    dataset_manifest: result.dataset_manifest,
+    dataset_index_entry: result.dataset_index_entry,
+    interval,
+    lookback_minutes: lookbackMinutes,
+    validation
+  });
+  options.emitOut(`dataset: ${result.dataset_ref}`);
+  options.emitOut(`symbol: ${coin}-PERP`);
+  options.emitOut(`interval: ${interval}`);
+  options.emitOut(`lookback_minutes: ${lookbackMinutes}`);
+  options.emitOut(`validation: ${validation.valid ? "valid" : "invalid"}`);
+}
+
+async function availableHyperliquidPerpMarkets(
+  env: Record<string, string | undefined>
+): Promise<
+  {
+    canonical_symbol: string;
+    source: "hyperliquid";
+    venue: "hyperliquid";
+    display_symbol: string;
+  }[]
+> {
+  if (env.OPENSTRAT_FAKE_HYPERLIQUID === "1") {
+    return ["BTC", "ETH", "HYPE"].map(hyperliquidMarketListItem);
+  }
+  const [meta] = await new HyperliquidInfoClient().metaAndAssetCtxs();
+  return meta.universe
+    .filter((asset) => asset.isDelisted !== true)
+    .map((asset) => hyperliquidMarketListItem(asset.name))
+    .sort((left, right) => left.canonical_symbol.localeCompare(right.canonical_symbol));
+}
+
+function hyperliquidMarketListItem(symbol: string): {
+  canonical_symbol: string;
+  source: "hyperliquid";
+  venue: "hyperliquid";
+  display_symbol: string;
+} {
+  return {
+    canonical_symbol: `${symbol.toUpperCase()}-PERP`,
+    source: "hyperliquid",
+    venue: "hyperliquid",
+    display_symbol: symbol.toUpperCase()
+  };
 }
 
 async function commandMarketIngestFixture(options: {
@@ -2138,6 +2571,299 @@ async function commandPiChat(
   events.close();
 }
 
+async function commandWorkbench(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  const subcommand = options.argv.shift();
+  switch (subcommand) {
+    case "run":
+      await commandWorkbenchRun(options);
+      return;
+    default:
+      throw new Error("Usage: openstrat workbench run --prompt <prompt>");
+  }
+}
+
+async function commandWorkbenchRun(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  if (!codexAuthConfigured(options.home)) {
+    throw new Error("Codex auth missing; run openstrat auth codex first");
+  }
+  const prompt = await promptFromArgs(options.argv);
+  if (!prompt) {
+    throw new Error("No prompt provided");
+  }
+
+  const registration = registerProject(options.home, options.cwd);
+  const store = new FileObjectStore(options.home.objectsDir);
+  const datasetRef =
+    stringFlag(options.argv, "--dataset-ref") ??
+    latestDatasetByCreatedAt(store, listMarketDatasetRefs(options.home));
+  if (!datasetRef) {
+    throw new Error(
+      "No project market dataset found; run openstrat markets ingest first"
+    );
+  }
+  const dataset = getMarketDatasetManifest(store, datasetRef);
+  const interval = dataset.coverage.candle_intervals[0] ?? "15m";
+  const strategyId = "volume_momentum_strategy";
+  const createdAt = new Date().toISOString();
+  const asOf = stringFlag(options.argv, "--as-of") ?? dataset.freshness.as_of;
+  const feeBps = optionalNumberFlag(options.argv, "--fee-bps") ?? 5;
+  const slippageBps = optionalNumberFlag(options.argv, "--slippage-bps") ?? 10;
+
+  const manifest = StrategyManifestSchema.parse({
+    strategy_id: strategyId,
+    strategy_version: "0.1.0",
+    name: "Volume Momentum Strategy",
+    description: `Fake-auth workbench proposal generated from prompt: ${prompt}`,
+    runtime: "typescript",
+    entrypoint: "src/strategy.ts",
+    autonomy_mode: "strategy_workbench",
+    allowed_symbols: [dataset.canonical_symbol],
+    parameters: {
+      lookback_candles: 2,
+      target_notional_usd: 1000,
+      prompt
+    },
+    required_data: [
+      {
+        kind: "candles",
+        canonical_symbol: dataset.canonical_symbol,
+        interval,
+        source: dataset.source
+      }
+    ],
+    output: "trade_intent",
+    created_at: createdAt,
+    source_refs: [dataset.dataset_ref]
+  });
+  const manifestPath = join(options.cwd, "openstrat.strategy.json");
+  const sourcePath = join(options.cwd, "src", "strategy.ts");
+  mkdirSync(dirname(sourcePath), { recursive: true });
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeFileSync(
+    sourcePath,
+    workbenchStrategySource({
+      interval,
+      strategyId,
+      symbol: dataset.canonical_symbol
+    }),
+    "utf8"
+  );
+
+  const proposalRef = projectObjectRef(
+    registration,
+    "workbench",
+    "strategy-proposals",
+    `${timestampRefSegment(createdAt)}.json`
+  );
+  store.putJson(proposalRef, {
+    proposal_ref: proposalRef,
+    created_at: createdAt,
+    prompt,
+    strategy_id: strategyId,
+    dataset_ref: dataset.dataset_ref,
+    files: [
+      {
+        path: "openstrat.strategy.json",
+        content: JSON.stringify(manifest, null, 2)
+      },
+      {
+        path: "src/strategy.ts",
+        content: readFileSync(sourcePath, "utf8")
+      }
+    ],
+    status: "proposed"
+  });
+
+  const loadedStrategy = await loadLocalStrategy(
+    options.cwd,
+    "openstrat.strategy.json"
+  );
+  const datasetPreflight = preflightStrategyDatasetCompatibility({
+    object_store: store,
+    strategy: loadedStrategy.strategy.manifest,
+    dataset_ref: dataset.dataset_ref,
+    as_of: asOf,
+    source: dataset.source,
+    venue: dataset.venue
+  });
+  const validationResult = await createStrategyRunner().evaluate(
+    loadedStrategy.strategy,
+    {
+      now: asOf,
+      mode: "paper",
+      risk_policy_ref: "risk/workbench",
+      decision_ref: `workbench/${strategyId}/validation`,
+      market_events: sampleStrategyMarketEvents(dataset.canonical_symbol)
+    }
+  );
+  const validationRef = projectObjectRef(
+    registration,
+    "workbench",
+    "strategy-validations",
+    safeRefSegment(strategyId),
+    `${timestampRefSegment(createdAt)}.json`
+  );
+  const objectRoot = projectObjectRoot(registration);
+  const validationArtifact: StrategyValidationArtifact = {
+    validation_ref: validationRef,
+    created_at: createdAt,
+    project: {
+      id: registration.id,
+      cwd: registration.cwd,
+      registration_ref: registration.ref,
+      object_root: objectRoot
+    },
+    strategy: loadedStrategy.strategy.manifest,
+    manifest_path: manifestPath,
+    source_path: sourcePath,
+    dataset_preflight: {
+      dataset_ref: datasetPreflight.manifest.dataset_ref,
+      required_families: datasetPreflight.required_families,
+      validation: {
+        valid: datasetPreflight.validation.valid,
+        missing_requirements: datasetPreflight.validation.missing_requirements
+      }
+    },
+    evaluation: {
+      intents: validationResult.intents.length
+    }
+  };
+  store.putJson(validationRef, validationArtifact);
+
+  const runId = `workbench_backtest_${Date.now()}_${safeRefSegment(strategyId)}`;
+  const backtestRoot = projectObjectRef(registration, "backtests", runId);
+  const requestRef = `${backtestRoot}/request.json`;
+  const reportRef = `${backtestRoot}/report.json`;
+  const metricsRef = `${backtestRoot}/metrics.json`;
+  const strategyRefs = writeLocalStrategyObjectRefs({
+    createdAt,
+    loadedStrategy,
+    registration,
+    store
+  });
+  const requestArtifact: LocalBacktestRequestArtifact = {
+    request_ref: requestRef,
+    created_at: createdAt,
+    generated_at: createdAt,
+    project: {
+      id: registration.id,
+      cwd: registration.cwd,
+      registration_ref: registration.ref,
+      object_root: objectRoot
+    },
+    strategy: loadedStrategy.strategy.manifest,
+    strategy_manifest_ref: strategyRefs.manifest_ref,
+    strategy_source_ref: strategyRefs.source_ref,
+    manifest_path: manifestPath,
+    source_path: sourcePath,
+    dataset_ref: dataset.dataset_ref,
+    validation_ref: validationRef,
+    fee_model_ref: `fees/fixed/${feeBps}bps`,
+    slippage_model_ref: `slippage/fixed/${slippageBps}bps`,
+    command_inputs: {
+      prompt,
+      proposal_ref: proposalRef,
+      dataset_ref: dataset.dataset_ref,
+      fee_bps: feeBps,
+      slippage_bps: slippageBps,
+      as_of: asOf
+    },
+    reproducibility: {
+      engine: "@openstrat/backtesting",
+      cli_version: cliVersion,
+      deterministic: true,
+      as_of: asOf
+    }
+  };
+  store.putJson(requestRef, requestArtifact);
+
+  const report = await runCandleBacktest({
+    run_id: runId,
+    strategy: loadedStrategy.strategy,
+    object_store: store,
+    artifact_ref_root: backtestRoot,
+    dataset_ref: dataset.dataset_ref,
+    candle_refs: normalizedRefsFor(dataset, "candles").map((ref) => ref.ref),
+    raw_artifact_refs: dataset.raw_refs.map((rawRef) => rawRef.ref),
+    generated_at: createdAt,
+    initial_equity_usd: 10_000,
+    fee_bps: feeBps,
+    slippage_model: () => ({
+      slippage_bps: slippageBps,
+      source_ref: `slippage/fixed/${slippageBps}bps`
+    }),
+    mode: "paper",
+    risk_policy_ref: "risk/workbench"
+  });
+  const reportWithEvidence = BacktestReportSchema.parse({
+    ...report,
+    artifact_refs: uniqueRefs([
+      proposalRef,
+      requestRef,
+      metricsRef,
+      strategyRefs.manifest_ref,
+      strategyRefs.source_ref,
+      validationRef,
+      ...report.artifact_refs
+    ])
+  });
+  const metricsArtifact: BacktestMetricsArtifact = {
+    metrics_ref: metricsRef,
+    created_at: createdAt,
+    backtest_report_ref: reportRef,
+    trade_ledger_ref: reportWithEvidence.trade_ledger_ref,
+    metrics: reportWithEvidence.metrics
+  };
+  store.putJson(metricsRef, metricsArtifact);
+  store.putJson(reportRef, reportWithEvidence);
+  writeProjectStatusArtifact(options.home, options.cwd);
+
+  options.setJsonData({
+    command: "workbench",
+    subcommand: "run",
+    project_id: registration.id,
+    project_object_root: objectRoot,
+    prompt,
+    dataset_ref: dataset.dataset_ref,
+    proposal_ref: proposalRef,
+    validation_ref: validationRef,
+    request_ref: requestRef,
+    backtest_report_ref: reportRef,
+    trade_ledger_ref: reportWithEvidence.trade_ledger_ref,
+    intent_ledger_ref: reportWithEvidence.intent_ledger_ref,
+    equity_curve_ref: reportWithEvidence.equity_curve_ref,
+    diagnostics_ref: reportWithEvidence.diagnostics_ref,
+    summary_ref: reportWithEvidence.summary_ref,
+    metrics_ref: metricsRef,
+    trades: reportWithEvidence.metrics.trades
+  });
+  options.emitOut(`proposal: ${proposalRef}`);
+  options.emitOut(`validation: ${validationRef}`);
+  options.emitOut(`request: ${requestRef}`);
+  options.emitOut(`report: ${reportRef}`);
+  options.emitOut(`trade_ledger: ${reportWithEvidence.trade_ledger_ref}`);
+  options.emitOut(`intent_ledger: ${reportWithEvidence.intent_ledger_ref}`);
+  options.emitOut(`equity_curve: ${reportWithEvidence.equity_curve_ref}`);
+  options.emitOut(`diagnostics: ${reportWithEvidence.diagnostics_ref}`);
+  options.emitOut(`summary: ${reportWithEvidence.summary_ref}`);
+  options.emitOut(`trades: ${reportWithEvidence.metrics.trades}`);
+}
+
 async function commandArtifacts(options: {
   emitOut: (line: string) => void;
   home: OpenStratHome;
@@ -2232,7 +2958,7 @@ function commandBundleExport(options: {
   const objects = Object.fromEntries(
     refs
       .filter((ref) => store.exists(ref))
-      .map((ref) => [ref, store.getJson(ref)] as const)
+      .map((ref) => [ref, bundleObjectValue(store, ref)] as const)
   );
   const manifestPath = join(bundleDir, "bundle.json");
   const artifactsPath = join(bundleDir, "artifacts.json");
@@ -2267,6 +2993,17 @@ function commandBundleExport(options: {
   options.emitOut(`manifest: ${manifestPath}`);
   options.emitOut(`artifacts: ${artifactsPath}`);
   options.emitOut(`refs: ${refs.length}`);
+}
+
+function bundleObjectValue(store: FileObjectStore, ref: string): unknown {
+  try {
+    return store.getJson(ref);
+  } catch {
+    return {
+      encoding: "utf8",
+      content: store.getBytes(ref).toString("utf8")
+    };
+  }
 }
 
 async function commandGateway(options: {
@@ -2342,7 +3079,7 @@ function codexChatManifest(home: OpenStratHome, sessionId: string, createdAt: st
 function printHelp(emitOut: (line: string) => void): void {
   emitOut("openstrat <command>");
   emitOut(
-    "commands: init, doctor, auth codex, chat [--runtime codex|pi], artifacts, market, strategy init|validate|propose-sample, backtest run|run-sample, gate create-local|create-sample|inspect, project status, bundle export, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
+    "commands: create, init, doctor, auth codex, chat [--runtime codex|pi], artifacts, markets list|ingest, market, workbench run, strategy init|validate|propose-sample, backtest run|run-sample, gate create-local|create-sample|inspect, project status, bundle export, deploy, ledger, memory, gateway, upgrade, update, reset --purge"
   );
 }
 
@@ -2741,6 +3478,18 @@ function buildProjectStatus(
     ...(latestBacktestReport?.trade_ledger_ref
       ? { trade_ledger_ref: latestBacktestReport.trade_ledger_ref }
       : {}),
+    ...(latestBacktestReport?.intent_ledger_ref
+      ? { backtest_intent_ledger_ref: latestBacktestReport.intent_ledger_ref }
+      : {}),
+    ...(latestBacktestReport?.equity_curve_ref
+      ? { backtest_equity_curve_ref: latestBacktestReport.equity_curve_ref }
+      : {}),
+    ...(latestBacktestReport?.diagnostics_ref
+      ? { backtest_diagnostics_ref: latestBacktestReport.diagnostics_ref }
+      : {}),
+    ...(latestBacktestReport?.summary_ref
+      ? { backtest_summary_ref: latestBacktestReport.summary_ref }
+      : {}),
     ...(latestGateArtifact?.gate_ref ? { gate_ref: latestGateArtifact.gate_ref } : {}),
     ...(latestGateArtifactRef ? { gate_artifact_ref: latestGateArtifactRef } : {}),
     ...(latestTranscript
@@ -2803,6 +3552,10 @@ function projectStatusEvidenceRefs(
     status.latest.backtest_report_ref,
     status.latest.backtest_metrics_ref,
     status.latest.trade_ledger_ref,
+    status.latest.backtest_intent_ledger_ref,
+    status.latest.backtest_equity_curve_ref,
+    status.latest.backtest_diagnostics_ref,
+    status.latest.backtest_summary_ref,
     status.latest.gate_ref,
     status.latest.gate_artifact_ref,
     status.status_ref

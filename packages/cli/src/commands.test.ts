@@ -57,6 +57,184 @@ describe("openstrat CLI commands", () => {
     expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
   });
 
+  it("creates a strategy project scaffold with project-local storage and deployment policy", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const parent = mkdtempSync(join(tmpdir(), "openstrat-create-parent-"));
+    const env = {
+      HOME: userHome,
+      OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
+    };
+
+    const create = await runOpenStratCli({
+      argv: ["create", "eth-trading", "--symbol", "ETH-PERP", "--interval", "15m"],
+      cwd: parent,
+      env
+    });
+    const projectDir = join(parent, "eth-trading");
+    const home = projectOpenStratRoot(projectDir);
+
+    expect(create.exitCode).toBe(0);
+    expect(create.stdout.join("\n")).toContain(`project_dir: ${projectDir}`);
+    expect(existsSync(home)).toBe(true);
+    expect(existsSync(join(projectDir, "openstrat.project.json"))).toBe(true);
+    expect(existsSync(join(projectDir, "openstrat.strategy.json"))).toBe(true);
+    expect(existsSync(join(projectDir, "openstrat.deploy.toml"))).toBe(true);
+    expect(existsSync(join(projectDir, "src", "strategy.ts"))).toBe(true);
+    expect(existsSync(join(projectDir, "src", "strategy.test.ts"))).toBe(true);
+    expect(existsSync(join(projectDir, "examples", "workbench-prompt.md"))).toBe(true);
+    expect(readFileSync(join(projectDir, "openstrat.strategy.json"), "utf8")).toContain(
+      '"entrypoint": "src/strategy.ts"'
+    );
+    expect(readFileSync(join(projectDir, "openstrat.deploy.toml"), "utf8")).toContain(
+      "[execution.builder_fee]"
+    );
+    expect(readFileSync(join(projectDir, "openstrat.deploy.toml"), "utf8")).toContain(
+      'hyperliquid_private_key = "FLY_SECRET:HYPERLIQUID_PRIVATE_KEY"'
+    );
+    expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
+  });
+
+  it("runs markets ingestion and fake workbench generation against the project dataset", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const parent = mkdtempSync(join(tmpdir(), "openstrat-workbench-parent-"));
+    const env = {
+      HOME: userHome,
+      OPENSTRAT_FAKE_CODEX_AUTH: "1",
+      OPENSTRAT_FAKE_HYPERLIQUID: "1",
+      OPENSTRAT_SKIP_EXTERNAL_CLI_CHECKS: "1"
+    };
+
+    const create = await runOpenStratCli({
+      argv: ["create", "eth-trading", "--symbol", "ETH-PERP", "--interval", "15m"],
+      cwd: parent,
+      env
+    });
+    const projectDir = join(parent, "eth-trading");
+    const auth = await runOpenStratCli({
+      argv: ["auth", "codex"],
+      cwd: projectDir,
+      env
+    });
+    const markets = await runOpenStratCli({
+      argv: ["markets", "list", "--json"],
+      cwd: projectDir,
+      env
+    });
+    const marketIngest = await runOpenStratCli({
+      argv: [
+        "markets",
+        "ingest",
+        "--symbol",
+        "ETH-PERP",
+        "--interval",
+        "15m",
+        "--lookback-minutes",
+        "60",
+        "--received-at",
+        "2026-06-04T00:15:00.000Z",
+        "--confirm-selection",
+        "--json"
+      ],
+      cwd: projectDir,
+      env
+    });
+    const ingestJson = parseCliJson(marketIngest.stdout);
+    const datasetRef = ingestJson.result.data?.dataset_ref as string;
+    const workbench = await runOpenStratCli({
+      argv: [
+        "workbench",
+        "run",
+        "--prompt",
+        "Develop a volume and momentum strategy for the available 15m ETH data.",
+        "--fee-bps",
+        "5",
+        "--slippage-bps",
+        "10",
+        "--as-of",
+        "2026-06-04T00:15:00.000Z",
+        "--json"
+      ],
+      cwd: projectDir,
+      env
+    });
+    const workbenchJson = parseCliJson(workbench.stdout);
+    const data = workbenchJson.result.data as {
+      backtest_report_ref: string;
+      diagnostics_ref: string;
+      equity_curve_ref: string;
+      intent_ledger_ref: string;
+      proposal_ref: string;
+      summary_ref: string;
+      trade_ledger_ref: string;
+      validation_ref: string;
+    };
+    const status = await runOpenStratCli({
+      argv: ["project", "status", "--json"],
+      cwd: projectDir,
+      env
+    });
+    const statusData = parseCliJson(status.stdout).result.data as {
+      latest: {
+        backtest_diagnostics_ref?: string;
+        backtest_equity_curve_ref?: string;
+        backtest_intent_ledger_ref?: string;
+        backtest_report_ref?: string;
+        backtest_summary_ref?: string;
+        dataset_ref?: string;
+        strategy_validation_ref?: string;
+      };
+    };
+    const home = projectOpenStratRoot(projectDir);
+    const report = JSON.parse(
+      readFileSync(join(home, "objects", data.backtest_report_ref), "utf8")
+    ) as { artifact_refs: string[]; dataset_ref: string; metrics: { trades: number } };
+    const summary = readFileSync(join(home, "objects", data.summary_ref), "utf8");
+
+    expect(create.exitCode).toBe(0);
+    expect(auth.exitCode).toBe(0);
+    expect(parseCliJson(markets.stdout).result.data).toMatchObject({
+      command: "markets",
+      subcommand: "list",
+      markets: expect.arrayContaining([
+        expect.objectContaining({ canonical_symbol: "ETH-PERP" })
+      ])
+    });
+    expect(marketIngest.exitCode).toBe(0);
+    expect(datasetRef).toContain("datasets/hyperliquid/ETH-PERP/");
+    expect(workbench.exitCode).toBe(0);
+    expect(workbenchJson.result.status).toBe("completed");
+    expect(data.proposal_ref).toContain("workbench/strategy-proposals/");
+    expect(data.validation_ref).toContain("workbench/strategy-validations/");
+    expect(data.intent_ledger_ref).toContain("intent-ledger.json");
+    expect(data.equity_curve_ref).toContain("equity-curve.json");
+    expect(data.diagnostics_ref).toContain("diagnostics.json");
+    expect(data.summary_ref).toContain("summary.md");
+    expect(existsSync(join(projectDir, "src", "strategy.ts"))).toBe(true);
+    expect(readFileSync(join(projectDir, "src", "strategy.ts"), "utf8")).toContain(
+      "volume_momentum_strategy"
+    );
+    expect(report.dataset_ref).toBe(datasetRef);
+    expect(report.metrics.trades).toBe(1);
+    expect(report.artifact_refs).toEqual(
+      expect.arrayContaining([
+        data.intent_ledger_ref,
+        data.equity_curve_ref,
+        data.diagnostics_ref,
+        data.summary_ref
+      ])
+    );
+    expect(summary).toContain("Backtest");
+    expect(statusData.latest).toMatchObject({
+      backtest_diagnostics_ref: data.diagnostics_ref,
+      backtest_equity_curve_ref: data.equity_curve_ref,
+      backtest_intent_ledger_ref: data.intent_ledger_ref,
+      backtest_report_ref: data.backtest_report_ref,
+      backtest_summary_ref: data.summary_ref,
+      dataset_ref: datasetRef,
+      strategy_validation_ref: data.validation_ref
+    });
+  });
+
   it("initializes, doctors, runs fake chat, lists artifacts, upgrades dry-run, and purges", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));

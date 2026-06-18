@@ -148,7 +148,7 @@ describe("candle backtest engine", () => {
     ).toThrow(/freshness stale/);
   });
 
-  it("runs a deterministic strategy over stored candles and writes fixed metrics plus trade ledger artifacts", async () => {
+  it("runs a deterministic strategy over stored candles and writes inspectable evidence artifacts", async () => {
     const store = new FileObjectStore(tempDir);
     const candleRef = "normalized/synthetic/candles/BTC-15m.json";
     const rawRef = "raw/synthetic/candles/BTC-15m.json";
@@ -175,7 +175,27 @@ describe("candle backtest engine", () => {
     expect(report.trade_ledger_ref).toBe(
       "backtests/backtest_synthetic_001/trade-ledger.json"
     );
-    expect(report.artifact_refs).toEqual(expect.arrayContaining([candleRef, rawRef]));
+    expect(report.intent_ledger_ref).toBe(
+      "backtests/backtest_synthetic_001/intent-ledger.json"
+    );
+    expect(report.equity_curve_ref).toBe(
+      "backtests/backtest_synthetic_001/equity-curve.json"
+    );
+    expect(report.diagnostics_ref).toBe(
+      "backtests/backtest_synthetic_001/diagnostics.json"
+    );
+    expect(report.summary_ref).toBe("backtests/backtest_synthetic_001/summary.md");
+    expect(report.artifact_refs).toEqual(
+      expect.arrayContaining([
+        candleRef,
+        rawRef,
+        report.trade_ledger_ref,
+        report.intent_ledger_ref,
+        report.equity_curve_ref,
+        report.diagnostics_ref,
+        report.summary_ref
+      ])
+    );
     expect(report.metrics).toMatchObject({
       trades: 2,
       wins: 1,
@@ -204,6 +224,33 @@ describe("candle backtest engine", () => {
       gross_pnl_usd: -100,
       net_pnl_usd: -103
     });
+
+    const intentLedger = store.getJson<unknown[]>(report.intent_ledger_ref);
+    const equityCurve = store.getJson<{ equity_usd: number }[]>(
+      report.equity_curve_ref
+    );
+    const diagnostics = store.getJson<{
+      candles: number;
+      closed_trades: number;
+      emitted_intents: number;
+      open_positions_at_end: number;
+    }>(report.diagnostics_ref);
+    const summary = store.getBytes(report.summary_ref).toString("utf8");
+
+    expect(intentLedger).toHaveLength(4);
+    expect(intentLedger[0]).toMatchObject({
+      action: "opened",
+      intent_id: "intent_open_1"
+    });
+    expect(equityCurve.at(-1)).toMatchObject({ equity_usd: 9994 });
+    expect(diagnostics).toMatchObject({
+      candles: 4,
+      closed_trades: 2,
+      emitted_intents: 4,
+      open_positions_at_end: 0
+    });
+    expect(summary).toContain("Backtest backtest_synthetic_001");
+    expect(summary).toContain("Net PnL: -6");
   });
 });
 
