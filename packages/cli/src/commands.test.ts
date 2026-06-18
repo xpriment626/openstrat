@@ -57,6 +57,50 @@ describe("openstrat CLI commands", () => {
     expect(existsSync(join(userHome, ".openstrat"))).toBe(false);
   });
 
+  it("opens the workbench by default and handles deterministic slash commands", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const workbench = await runOpenStratCli({
+      argv: [],
+      cwd,
+      env: {
+        HOME: userHome,
+        OPENSTRAT_FAKE_HYPERLIQUID: "1",
+        OPENSTRAT_WORKBENCH_PROMPT: "/markets"
+      }
+    });
+
+    expect(workbench.exitCode).toBe(0);
+    expect(workbench.stdout.join("\n")).toContain("OpenStrat Workbench");
+    expect(workbench.stdout.join("\n")).toContain(
+      "primary_interaction: natural_language"
+    );
+    expect(workbench.stdout.join("\n")).toContain(
+      "slash_commands: /markets, /datasets, /strategy, /backtest, /risk, /deploy, /status"
+    );
+    expect(workbench.stdout.join("\n")).toContain("ETH-PERP");
+  });
+
+  it("routes default natural-language workbench prompts through Pi", async () => {
+    const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "openstrat-workspace-"));
+    const workbench = await runOpenStratCli({
+      argv: [],
+      cwd,
+      env: {
+        HOME: userHome,
+        OPENSTRAT_FAKE_PI: "1",
+        OPENSTRAT_WORKBENCH_PROMPT: "Find a momentum setup for the current project."
+      }
+    });
+
+    expect(workbench.exitCode).toBe(0);
+    expect(workbench.stdout.join("\n")).toContain("OpenStrat Workbench");
+    expect(workbench.stdout.join("\n")).toContain("Hello from OpenStrat.");
+    expect(workbench.stdout.join("\n")).toContain("runtime: pi");
+    expect(workbench.stdout.join("\n")).not.toContain("runtime: codex_app_server");
+  });
+
   it("creates a strategy project scaffold with project-local storage and deployment policy", async () => {
     const userHome = mkdtempSync(join(tmpdir(), "openstrat-home-"));
     const parent = mkdtempSync(join(tmpdir(), "openstrat-create-parent-"));

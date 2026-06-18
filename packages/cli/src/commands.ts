@@ -35,15 +35,23 @@ import {
   CandleIntervalSchema,
   DecisionLedgerEntrySchema,
   DeploymentGateSchema,
+  MarketDatumSchema,
   MarketDatasetManifestSchema,
+  MarketRegistryEntrySchema,
   MemoryProposalSchema,
+  OrderbookSnapshotSchema,
+  RiskReviewSchema,
   StrategyManifestSchema,
   type AgentResultEnvelope,
   type BacktestReport,
   type BotRunManifest,
+  type Candle,
   type DeploymentGate,
+  type MarketDatum,
   type MarketDatasetManifest,
+  type MarketRegistryEntry,
   type NormalizedMarketDataRef,
+  type OrderbookSnapshot,
   type StrategyManifest
 } from "@openstrat/domain";
 import {
@@ -51,9 +59,15 @@ import {
   HyperliquidInfoClient,
   ingestHyperliquidWindow,
   validateMarketDataset,
-  type HyperliquidReadClient
+  type CandleQuery,
+  type HyperliquidReadClient,
+  type MarketDataQuery,
+  type MarketDataReader,
+  type MarketDataSnapshotContext,
+  type OrderbookQuery
 } from "@openstrat/market-data";
 import { FileObjectStore, SqliteEventLog } from "@openstrat/persistence";
+import type { RiskPolicyEngine } from "@openstrat/risk";
 import {
   createStrategyRunner,
   defineStrategy,
@@ -62,6 +76,7 @@ import {
   type StrategyModule
 } from "@openstrat/strategy-sdk";
 import {
+  AGENT_TOOL_GATEWAY_TOOLS,
   type AgentToolGateway,
   createAgentToolGateway,
   type DeploymentGateInspection,
@@ -86,6 +101,15 @@ import { cliVersion } from "./version.js";
 const MIN_NODE_VERSION = "22.19.0";
 const CODEX_PROVIDER_ID = "openai-codex";
 const MARKET_FIXTURE_RECEIVED_AT = "2026-06-04T00:00:00.000Z";
+const WORKBENCH_SLASH_COMMANDS = [
+  "/markets",
+  "/datasets",
+  "/strategy",
+  "/backtest",
+  "/risk",
+  "/deploy",
+  "/status"
+] as const;
 const SAMPLE_STRATEGY_SOURCE = `import { defineStrategy } from "@openstrat/strategy-sdk";
 
 export const strategy = defineStrategy(
@@ -273,7 +297,7 @@ export async function runOpenStratCli(
   const home = resolveOpenStratHome({ cwd, env });
 
   try {
-    if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+    if (argv[0] === "--help" || argv[0] === "-h") {
       printHelp(emitOut);
       return finishCliSuccess({
         commandName,
@@ -286,6 +310,29 @@ export async function runOpenStratCli(
     }
     if (argv[0] === "--version" || argv[0] === "-v") {
       emitOut(cliVersion);
+      return finishCliSuccess({
+        commandName,
+        data: jsonData,
+        emitJsonOut,
+        jsonMode,
+        stderrLines,
+        stdoutLines
+      });
+    }
+
+    if (
+      argv.length === 0 ||
+      argv[0] === "--prompt" ||
+      argv[0]?.startsWith("/")
+    ) {
+      await commandWorkbenchSession({
+        argv,
+        cwd,
+        emitOut,
+        env,
+        home,
+        setJsonData
+      });
       return finishCliSuccess({
         commandName,
         data: jsonData,
@@ -488,6 +535,7 @@ function cliErrorResult(message: string): AgentResultEnvelope {
 function isCliContractError(message: string): boolean {
   return (
     message.startsWith("Usage:") ||
+    message.startsWith("Interactive workbench requires a TTY") ||
     message.startsWith("Missing required flag:") ||
     message.startsWith("No prompt provided") ||
     message.startsWith("Pass exactly one of") ||
@@ -497,8 +545,11 @@ function isCliContractError(message: string): boolean {
 
 function commandNameForJson(argv: readonly string[]): string {
   const command = argv[0];
-  if (!command || command === "--help" || command === "-h") {
+  if (command === "--help" || command === "-h") {
     return "help";
+  }
+  if (!command || command === "--prompt" || command.startsWith("/")) {
+    return "workbench";
   }
   if (command === "--version" || command === "-v") {
     return "version";
@@ -2499,6 +2550,15 @@ async function commandPiChat(
   prompt: string
 ): Promise<void> {
   const events = new SqliteEventLog(options.home.stateDbPath);
+  const now = () => new Date().toISOString();
+  const objectStore = new FileObjectStore(options.home.objectsDir);
+  const toolGateway = createAgentToolGateway({
+    events,
+    marketData: new ProjectMarketDataReader(options.home, objectStore),
+    objects: objectStore,
+    risk: createWorkbenchRiskPolicyEngine(now),
+    now
+  });
   const sessionId = `agent_session_${Date.now()}`;
   const transcriptStore = new FilePiTranscriptStore(options.home.root);
   const sessionFactory =
@@ -2511,15 +2571,16 @@ async function commandPiChat(
       : createPersistedPiSessionFactory(options.home);
   const adapter = createPiAgentRuntimeAdapter({
     events,
-    now: () => new Date().toISOString(),
+    now,
     policy: createAgentRuntimePolicyEnforcer(
       createAgentRuntimePolicy({
         autonomy_mode: "strategy_workbench",
         allowed_model_profile_ids: ["model/openai-codex-subscription"],
-        allowed_tool_names: ["market_data.read_snapshot"]
+        allowed_tool_names: AGENT_TOOL_GATEWAY_TOOLS
       })
     ),
     sessionFactory,
+    toolGateway,
     transcriptStore
   });
 
@@ -2549,7 +2610,7 @@ async function commandPiChat(
       tool_grant_ids: [],
       canonical_ledger_refs: []
     },
-    toolNames: ["market_data.read_snapshot"]
+    toolNames: AGENT_TOOL_GATEWAY_TOOLS
   });
   await adapter.prompt({ session_id: sessionId, prompt });
   await adapter.dispose(sessionId);
@@ -2571,6 +2632,103 @@ async function commandPiChat(
   events.close();
 }
 
+class ProjectMarketDataReader implements MarketDataReader {
+  constructor(
+    private readonly home: OpenStratHome,
+    private readonly store: FileObjectStore
+  ) {}
+
+  async getMarket(canonicalSymbol: string): Promise<MarketRegistryEntry | undefined> {
+    const dataset = this.latestDataset({
+      canonical_symbol: canonicalSymbol
+    });
+    if (!dataset) {
+      return undefined;
+    }
+    const registryRef = requireNormalizedRef(dataset, "market_registry").ref;
+    const registry = this.store
+      .getJson<unknown[]>(registryRef)
+      .map((entry) => MarketRegistryEntrySchema.parse(entry));
+    return registry.find((entry) => entry.canonical_symbol === canonicalSymbol);
+  }
+
+  async getLatestPrice(query: MarketDataQuery): Promise<MarketDatum> {
+    const dataset = this.requireLatestDataset(query);
+    const latestPriceRef = requireNormalizedRef(dataset, "mark_prices").ref;
+    return MarketDatumSchema.parse(this.store.getJson(latestPriceRef));
+  }
+
+  async getLatestDataset(
+    query: MarketDataQuery
+  ): Promise<MarketDataSnapshotContext | undefined> {
+    const dataset = this.latestDataset(query);
+    if (!dataset) {
+      return undefined;
+    }
+    return {
+      dataset_ref: dataset.dataset_ref,
+      registry_ref: requireNormalizedRef(dataset, "market_registry").ref,
+      latest_price_ref: requireNormalizedRef(dataset, "mark_prices").ref,
+      raw_refs: dataset.raw_refs,
+      normalized_refs: dataset.normalized_refs,
+      freshness: dataset.freshness,
+      source_provenance: dataset.source_provenance
+    };
+  }
+
+  async getCandles(query: CandleQuery): Promise<Candle[]> {
+    const dataset = this.requireLatestDataset(query);
+    return this.store.getJson<Candle[]>(requireNormalizedRef(dataset, "candles").ref);
+  }
+
+  async getOrderbookSnapshot(query: OrderbookQuery): Promise<OrderbookSnapshot> {
+    const dataset = this.requireLatestDataset(query);
+    return OrderbookSnapshotSchema.parse(
+      this.store.getJson(requireNormalizedRef(dataset, "orderbook_snapshots").ref)
+    );
+  }
+
+  private requireLatestDataset(query: MarketDataQuery): MarketDatasetManifest {
+    const dataset = this.latestDataset(query);
+    if (!dataset) {
+      throw new Error(`Market dataset not found: ${query.canonical_symbol}`);
+    }
+    return dataset;
+  }
+
+  private latestDataset(query: MarketDataQuery): MarketDatasetManifest | undefined {
+    return listMarketDatasetRefs(this.home)
+      .map((ref) => getMarketDatasetManifest(this.store, ref))
+      .filter((dataset) => dataset.canonical_symbol === query.canonical_symbol)
+      .filter((dataset) => !query.source || dataset.source === query.source)
+      .filter((dataset) => !query.venue || dataset.venue === query.venue)
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
+  }
+}
+
+function createWorkbenchRiskPolicyEngine(now: () => string): RiskPolicyEngine {
+  return {
+    async review(intent, policy) {
+      return RiskReviewSchema.parse({
+        id: `risk_review_${Date.now()}_${safeRefSegment(intent.id)}`,
+        intent_id: intent.id,
+        policy_id: policy.id,
+        created_at: now(),
+        status: "needs_review",
+        checks: [
+          {
+            name: "workbench_manual_review",
+            status: "warn",
+            message:
+              "Workbench risk validation records the intent but requires human review before deployment."
+          }
+        ],
+        required_approvals: ["human_review"]
+      });
+    }
+  };
+}
+
 async function commandWorkbench(options: {
   argv: string[];
   cwd: string;
@@ -2581,11 +2739,184 @@ async function commandWorkbench(options: {
 }): Promise<void> {
   const subcommand = options.argv.shift();
   switch (subcommand) {
+    case undefined:
+    case "chat":
+    case "session":
+      await commandWorkbenchSession(options);
+      return;
     case "run":
       await commandWorkbenchRun(options);
       return;
     default:
-      throw new Error("Usage: openstrat workbench run --prompt <prompt>");
+      if (subcommand.startsWith("/") || subcommand === "--prompt") {
+        options.argv.unshift(subcommand);
+        await commandWorkbenchSession(options);
+        return;
+      }
+      throw new Error(
+        "Usage: openstrat workbench [--prompt <prompt>|run --prompt <prompt>]"
+      );
+  }
+}
+
+async function commandWorkbenchSession(options: {
+  argv: string[];
+  cwd: string;
+  emitOut: (line: string) => void;
+  env: Record<string, string | undefined>;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): Promise<void> {
+  ensureOpenStratHome(options.home);
+  const prompt = await workbenchPromptFromArgs(options.argv, options.env);
+  emitWorkbenchSessionHeader(options.emitOut);
+  if (prompt.trim().startsWith("/")) {
+    await commandWorkbenchSlashCommand(options, prompt.trim());
+    return;
+  }
+  await commandPiChat(options, prompt);
+}
+
+async function commandWorkbenchSlashCommand(
+  options: {
+    argv: string[];
+    cwd: string;
+    emitOut: (line: string) => void;
+    env: Record<string, string | undefined>;
+    home: OpenStratHome;
+    setJsonData: SetCliJsonData;
+  },
+  prompt: string
+): Promise<void> {
+  const [command] = prompt.split(/\s+/);
+  switch (command) {
+    case "/markets": {
+      const markets = await availableHyperliquidPerpMarkets(options.env);
+      options.setJsonData({
+        command: "workbench",
+        subcommand: "/markets",
+        markets
+      });
+      options.emitOut("markets:");
+      for (const market of markets) {
+        options.emitOut(
+          `${market.canonical_symbol} ${market.source} ${market.venue}`
+        );
+      }
+      return;
+    }
+    case "/datasets": {
+      const store = new FileObjectStore(options.home.objectsDir);
+      const datasets = listMarketDatasetRefs(options.home).map((ref) =>
+        getMarketDatasetManifest(store, ref)
+      );
+      options.setJsonData({
+        command: "workbench",
+        subcommand: "/datasets",
+        datasets: datasets.map(marketDatasetListItem)
+      });
+      if (datasets.length === 0) {
+        options.emitOut("No market datasets found.");
+        return;
+      }
+      options.emitOut("datasets:");
+      for (const dataset of datasets) {
+        options.emitOut(
+          `${dataset.canonical_symbol} ${dataset.source} ${dataset.venue} ${dataset.dataset_ref}`
+        );
+      }
+      return;
+    }
+    case "/strategy":
+      emitWorkbenchStatusRefs(options, ["strategy_manifest_path", "strategy_source_path"]);
+      return;
+    case "/backtest":
+      emitWorkbenchStatusRefs(options, [
+        "backtest_request_ref",
+        "backtest_report_ref",
+        "backtest_metrics_ref",
+        "backtest_summary_ref"
+      ]);
+      return;
+    case "/risk":
+      emitWorkbenchStatusRefs(options, ["gate_ref", "gate_artifact_ref"]);
+      return;
+    case "/deploy":
+      emitWorkbenchStatusRefs(options, ["gate_ref", "gate_artifact_ref"]);
+      return;
+    case "/status":
+      emitWorkbenchStatus(options);
+      return;
+    default:
+      throw new Error(
+        `Unknown workbench slash command: ${command}. Available: ${WORKBENCH_SLASH_COMMANDS.join(", ")}`
+      );
+  }
+}
+
+function emitWorkbenchSessionHeader(emitOut: (line: string) => void): void {
+  emitOut("OpenStrat Workbench");
+  emitOut("entrypoint: openstrat");
+  emitOut("mode: interactive_tui");
+  emitOut("primary_interaction: natural_language");
+  emitOut("runtime: pi");
+  emitOut(`slash_commands: ${WORKBENCH_SLASH_COMMANDS.join(", ")}`);
+  emitOut("headless: openstrat chat --prompt, openstrat workbench run --prompt");
+}
+
+function emitWorkbenchStatus(options: {
+  cwd: string;
+  emitOut: (line: string) => void;
+  home: OpenStratHome;
+  setJsonData: SetCliJsonData;
+}): void {
+  const status = buildProjectStatus(options.home, options.cwd);
+  new FileObjectStore(options.home.objectsDir).putJson(status.status_ref, status, {
+    overwrite: true
+  });
+  options.setJsonData({
+    command: "workbench",
+    subcommand: "/status",
+    status
+  });
+  options.emitOut(`status: ${status.status_ref}`);
+  options.emitOut(`project: ${status.project.cwd}`);
+  options.emitOut(`datasets: ${status.counts.datasets}`);
+  options.emitOut(`backtests: ${status.counts.backtests}`);
+  options.emitOut(`chat_sessions: ${status.counts.chat_sessions}`);
+  for (const [key, value] of Object.entries(status.latest)) {
+    options.emitOut(`${key}: ${value}`);
+  }
+}
+
+function emitWorkbenchStatusRefs(
+  options: {
+    cwd: string;
+    emitOut: (line: string) => void;
+    home: OpenStratHome;
+    setJsonData: SetCliJsonData;
+  },
+  keys: readonly (keyof ProjectStatusSnapshot["latest"])[]
+): void {
+  const status = buildProjectStatus(options.home, options.cwd);
+  const refs: Record<string, string> = {};
+  for (const key of keys) {
+    const value = status.latest[key];
+    if (typeof value === "string") {
+      refs[key] = value;
+    }
+  }
+  options.setJsonData({
+    command: "workbench",
+    subcommand: "slash",
+    refs
+  });
+  if (Object.keys(refs).length === 0) {
+    options.emitOut("No matching workbench refs found.");
+    return;
+  }
+  for (const [key, value] of Object.entries(refs)) {
+    options.emitOut(`${key}: ${value}`);
   }
 }
 
@@ -3119,6 +3450,28 @@ async function promptFromArgs(argv: string[]): Promise<string> {
     return argv[promptIndex + 1] ?? "";
   }
   return promptLine("openstrat> ");
+}
+
+async function workbenchPromptFromArgs(
+  argv: string[],
+  env: Record<string, string | undefined>
+): Promise<string> {
+  if (argv[0]?.startsWith("/")) {
+    return argv.join(" ");
+  }
+  const promptIndex = argv.indexOf("--prompt");
+  if (promptIndex >= 0) {
+    return argv[promptIndex + 1] ?? "";
+  }
+  if (env.OPENSTRAT_WORKBENCH_PROMPT) {
+    return env.OPENSTRAT_WORKBENCH_PROMPT;
+  }
+  if (input.isTTY) {
+    return promptLine("openstrat> ");
+  }
+  throw new Error(
+    "Interactive workbench requires a TTY; pass --prompt or set OPENSTRAT_WORKBENCH_PROMPT for headless tests"
+  );
 }
 
 function chatRuntimeFromArgs(
