@@ -3,57 +3,24 @@ import type {
   Candle,
   CandleInterval,
   FundingRateSnapshot,
-  MarketDatasetIndexEntry,
-  MarketDatasetManifest,
   MarketDatum,
-  MarketDataAcquisitionMethod,
   MarketRegistryEntry,
-  MarketVenueCapability,
   OrderbookSnapshot
 } from "@openstrat/domain";
 import {
   CandleSchema,
   FundingRateSnapshotSchema,
-  MarketDatasetManifestSchema,
   MarketDatumSchema,
   MarketRegistryEntrySchema,
-  MarketVenueCapabilitySchema,
   OrderbookSnapshotSchema
 } from "@openstrat/domain";
 import type { ObjectStore } from "@openstrat/persistence";
-import {
-  marketDatasetManifestRef,
-  normalizedMarketDataObjectRef,
-  rawMarketDataObjectRef,
-  writeMarketDatasetManifestAndIndex
-} from "../datasets.js";
 
 export const HYPERLIQUID_INFO_ENDPOINT = "https://api.hyperliquid.xyz/info";
 const SOURCE = "hyperliquid";
 const VENUE = "hyperliquid";
 const DEFAULT_STALE_AFTER_MS = 5_000;
 const DEFAULT_LOW_LIQUIDITY_NOTIONAL_USD = 100_000;
-
-const HYPERLIQUID_VENUE_CAPABILITY = MarketVenueCapabilitySchema.parse({
-  source: SOURCE,
-  venue: VENUE,
-  source_kind: "public_ledger",
-  public_ledger: true,
-  replayable: true,
-  asset_classes: ["crypto"],
-  acquisition_methods: ["fixture", "guarded_live", "historical_backfill"],
-  record_families: [
-    "market_registry",
-    "mark_prices",
-    "candles",
-    "funding_rates",
-    "orderbook_snapshots"
-  ],
-  canonical_symbol_examples: ["BTC-PERP", "ETH-PERP"],
-  metadata: {
-    api: "hyperliquid-info"
-  }
-});
 
 const DecimalStringSchema = z.string().regex(/^-?[0-9]+(\.[0-9]+)?$/);
 const NonNegativeDecimalStringSchema = z.string().regex(/^[0-9]+(\.[0-9]+)?$/);
@@ -246,10 +213,6 @@ export interface HyperliquidReadClient {
   fundingHistory(
     request: Omit<HyperliquidFundingHistoryRequest, "type">
   ): Promise<HyperliquidFundingHistoryResponse>;
-}
-
-export function hyperliquidVenueCapability(): MarketVenueCapability {
-  return MarketVenueCapabilitySchema.parse(HYPERLIQUID_VENUE_CAPABILITY);
 }
 
 export class HyperliquidInfoClient implements HyperliquidReadClient {
@@ -533,16 +496,10 @@ export interface HyperliquidIngestRequest {
   start_time_ms: number;
   end_time_ms: number;
   received_at?: string;
-  acquisition_method?: MarketDataAcquisitionMethod;
 }
 
 export interface HyperliquidIngestResult {
-  dataset_ref: string;
-  dataset_manifest: MarketDatasetManifest;
-  dataset_index_entry: MarketDatasetIndexEntry;
   registry_ref: string;
-  latest_price_ref: string;
-  price_refs: string[];
   candle_refs: string[];
   funding_refs: string[];
   orderbook_refs: string[];
@@ -558,32 +515,14 @@ export async function ingestHyperliquidWindow(
   request: HyperliquidIngestRequest
 ): Promise<HyperliquidIngestResult> {
   const receivedAt = request.received_at ?? new Date().toISOString();
-  const acquisitionMethod = request.acquisition_method ?? "fixture";
   const timestampSlug = slugTimestamp(receivedAt);
-  const rangeSlug = `${request.start_time_ms}-${request.end_time_ms}`;
-  const canonical = canonicalSymbol(request.coin);
+  const windowSlug = `${request.coin}/${request.interval}/${request.start_time_ms}-${request.end_time_ms}`;
 
   const rawRefs = {
-    meta_and_asset_ctxs: rawMarketDataObjectRef({
-      source: SOURCE,
-      family: "meta-and-asset-ctxs",
-      parts: [timestampSlug]
-    }),
-    candles: rawMarketDataObjectRef({
-      source: SOURCE,
-      family: "candles",
-      parts: [request.coin, request.interval, rangeSlug]
-    }),
-    funding: rawMarketDataObjectRef({
-      source: SOURCE,
-      family: "funding",
-      parts: [request.coin, rangeSlug]
-    }),
-    l2_book: rawMarketDataObjectRef({
-      source: SOURCE,
-      family: "l2-book",
-      parts: [request.coin, timestampSlug]
-    })
+    meta_and_asset_ctxs: `raw/hyperliquid/meta-and-asset-ctxs/${timestampSlug}.json`,
+    candles: `raw/hyperliquid/candles/${windowSlug}.json`,
+    funding: `raw/hyperliquid/funding/${request.coin}/${request.start_time_ms}-${request.end_time_ms}.json`,
+    l2_book: `raw/hyperliquid/l2-book/${request.coin}/${timestampSlug}.json`
   };
 
   const [metaAndAssetCtxs, candlesRaw, fundingRaw, l2BookRaw] = await Promise.all([
@@ -607,7 +546,7 @@ export async function ingestHyperliquidWindow(
   request.object_store.putJson(rawRefs.funding, fundingRaw);
   request.object_store.putJson(rawRefs.l2_book, l2BookRaw);
 
-  const normalizedMeta = normalizeHyperliquidMetaAndAssetCtxs(metaAndAssetCtxs, {
+  const registry = deriveHyperliquidMarketRegistry(metaAndAssetCtxs, {
     received_at: receivedAt,
     raw_ref: rawRefs.meta_and_asset_ctxs
   });
@@ -623,203 +562,19 @@ export async function ingestHyperliquidWindow(
     received_at: receivedAt,
     raw_ref: rawRefs.l2_book
   });
-  const latestPrice = normalizedMeta.mark_prices.find(
-    (price) => price.canonical_symbol === canonical
-  );
-  if (!latestPrice) {
-    throw new Error(`Hyperliquid mark price not found: ${canonical}`);
-  }
 
   const registryRef = `normalized/hyperliquid/registry/${timestampSlug}.json`;
-  const latestPriceRef = normalizedMarketDataObjectRef({
-    source: SOURCE,
-    family: "mark-prices",
-    parts: [canonical, timestampSlug]
-  });
-  const candleRef = normalizedMarketDataObjectRef({
-    source: SOURCE,
-    family: "candles",
-    parts: [request.coin, request.interval, rangeSlug]
-  });
-  const fundingRef = normalizedMarketDataObjectRef({
-    source: SOURCE,
-    family: "funding",
-    parts: [request.coin, rangeSlug]
-  });
-  const orderbookRef = normalizedMarketDataObjectRef({
-    source: SOURCE,
-    family: "l2-book",
-    parts: [request.coin, timestampSlug]
-  });
+  const candleRef = `normalized/hyperliquid/candles/${windowSlug}.json`;
+  const fundingRef = `normalized/hyperliquid/funding/${request.coin}/${request.start_time_ms}-${request.end_time_ms}.json`;
+  const orderbookRef = `normalized/hyperliquid/l2-book/${request.coin}/${timestampSlug}.json`;
 
-  request.object_store.putJson(registryRef, normalizedMeta.registry);
-  request.object_store.putJson(latestPriceRef, latestPrice);
+  request.object_store.putJson(registryRef, registry);
   request.object_store.putJson(candleRef, candles);
   request.object_store.putJson(fundingRef, funding);
   request.object_store.putJson(orderbookRef, orderbook);
 
-  const datasetRef = marketDatasetManifestRef({
-    source: SOURCE,
-    canonical_symbol: canonical,
-    received_at: receivedAt
-  });
-  const datasetManifest = MarketDatasetManifestSchema.parse({
-    dataset_ref: datasetRef,
-    canonical_symbol: canonical,
-    source: SOURCE,
-    venue: VENUE,
-    asset_class: "crypto",
-    created_at: receivedAt,
-    time_range: {
-      start_at: new Date(request.start_time_ms).toISOString(),
-      end_at: new Date(request.end_time_ms).toISOString()
-    },
-    acquisition: {
-      method: acquisitionMethod,
-      requested_at: receivedAt,
-      completed_at: receivedAt,
-      actor: "hyperliquid-adapter",
-      deterministic: acquisitionMethod === "fixture"
-    },
-    source_provenance: {
-      source_kind: "public_ledger",
-      public_ledger: true,
-      replayable: true,
-      verification_refs: ["https://hyperliquid.gitbook.io/hyperliquid-docs/"]
-    },
-    raw_refs: [
-      {
-        ref: rawRefs.meta_and_asset_ctxs,
-        kind: "meta_and_asset_contexts",
-        source: SOURCE,
-        venue: VENUE,
-        captured_at: receivedAt,
-        request: { type: "metaAndAssetCtxs" },
-        immutable: true
-      },
-      {
-        ref: rawRefs.candles,
-        kind: "candles",
-        source: SOURCE,
-        venue: VENUE,
-        captured_at: receivedAt,
-        request: {
-          type: "candleSnapshot",
-          req: {
-            coin: request.coin,
-            interval: request.interval,
-            startTime: request.start_time_ms,
-            endTime: request.end_time_ms
-          }
-        },
-        immutable: true
-      },
-      {
-        ref: rawRefs.funding,
-        kind: "funding",
-        source: SOURCE,
-        venue: VENUE,
-        captured_at: receivedAt,
-        request: {
-          type: "fundingHistory",
-          coin: request.coin,
-          startTime: request.start_time_ms,
-          endTime: request.end_time_ms
-        },
-        immutable: true
-      },
-      {
-        ref: rawRefs.l2_book,
-        kind: "l2_book",
-        source: SOURCE,
-        venue: VENUE,
-        captured_at: receivedAt,
-        request: {
-          type: "l2Book",
-          coin: request.coin
-        },
-        immutable: true
-      }
-    ],
-    normalized_refs: [
-      {
-        ref: registryRef,
-        family: "market_registry",
-        source: SOURCE,
-        venue: VENUE,
-        created_at: receivedAt,
-        raw_refs: [rawRefs.meta_and_asset_ctxs],
-        immutable: true
-      },
-      {
-        ref: latestPriceRef,
-        family: "mark_prices",
-        canonical_symbol: canonical,
-        source: SOURCE,
-        venue: VENUE,
-        created_at: receivedAt,
-        raw_refs: [rawRefs.meta_and_asset_ctxs],
-        immutable: true
-      },
-      {
-        ref: candleRef,
-        family: "candles",
-        canonical_symbol: canonical,
-        source: SOURCE,
-        venue: VENUE,
-        created_at: receivedAt,
-        raw_refs: [rawRefs.candles],
-        immutable: true
-      },
-      {
-        ref: fundingRef,
-        family: "funding_rates",
-        canonical_symbol: canonical,
-        source: SOURCE,
-        venue: VENUE,
-        created_at: receivedAt,
-        raw_refs: [rawRefs.funding],
-        immutable: true
-      },
-      {
-        ref: orderbookRef,
-        family: "orderbook_snapshots",
-        canonical_symbol: canonical,
-        source: SOURCE,
-        venue: VENUE,
-        created_at: receivedAt,
-        raw_refs: [rawRefs.l2_book],
-        immutable: true
-      }
-    ],
-    freshness: {
-      as_of: receivedAt,
-      stale_after_ms: DEFAULT_STALE_AFTER_MS
-    },
-    coverage: {
-      families: [
-        "market_registry",
-        "mark_prices",
-        "candles",
-        "funding_rates",
-        "orderbook_snapshots"
-      ],
-      candle_intervals: [request.interval]
-    },
-    append_only: true
-  });
-  const datasetIndexEntry = writeMarketDatasetManifestAndIndex(
-    request.object_store,
-    datasetManifest
-  );
-
   return {
-    dataset_ref: datasetRef,
-    dataset_manifest: datasetManifest,
-    dataset_index_entry: datasetIndexEntry,
     registry_ref: registryRef,
-    latest_price_ref: latestPriceRef,
-    price_refs: [latestPriceRef],
     candle_refs: [candleRef],
     funding_refs: [fundingRef],
     orderbook_refs: [orderbookRef],

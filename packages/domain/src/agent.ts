@@ -8,7 +8,6 @@ import {
   JsonRecordSchema,
   NonEmptyStringSchema,
   PositiveFiniteSchema,
-  ProposalObjectRefSchema,
   SourceRefSchema
 } from "./common.js";
 
@@ -19,29 +18,13 @@ export const AgentRuntimeKindSchema = z.enum([
   "fake"
 ]);
 
-const AgentRuntimeConfigBaseSchema = z.object({
+export const AgentRuntimeConfigSchema = z.object({
+  kind: AgentRuntimeKindSchema,
   adapter: NonEmptyStringSchema,
   model_profile_id: NonEmptyStringSchema.optional(),
   provider: NonEmptyStringSchema.optional(),
   model: NonEmptyStringSchema.optional()
 });
-
-export const AgentRuntimeConfigSchema = z.discriminatedUnion("kind", [
-  AgentRuntimeConfigBaseSchema.extend({
-    kind: z.literal("pi")
-  }),
-  AgentRuntimeConfigBaseSchema.extend({
-    kind: z.literal("codex_app_server"),
-    model_profile_id: NonEmptyStringSchema,
-    provider: z.literal("openai-codex")
-  }),
-  AgentRuntimeConfigBaseSchema.extend({
-    kind: z.literal("openclaw_compat")
-  }),
-  AgentRuntimeConfigBaseSchema.extend({
-    kind: z.literal("fake")
-  })
-]);
 
 export const AgentArtifactKindSchema = z.enum([
   "agent_transcript",
@@ -171,15 +154,6 @@ export const AgentRuntimeEventSchema = z.object({
   event_stream_id: NonEmptyStringSchema
 });
 
-export const AgentRuntimeEventMetadataSchema = z
-  .object({
-    transcript_ref: SourceRefSchema.optional(),
-    runtime: AgentRuntimeKindSchema.optional(),
-    runtime_session_id: NonEmptyStringSchema.optional(),
-    codex_thread_id: NonEmptyStringSchema.optional()
-  })
-  .passthrough();
-
 export const AgentToolCallStatusSchema = z.enum([
   "requested",
   "blocked",
@@ -193,36 +167,6 @@ export const AgentToolSideEffectSchema = z.enum([
   "proposal_written",
   "scratch_workspace_write"
 ]);
-
-export const AgentResultEnvelopeSchema = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("completed"),
-    result_ref: SourceRefSchema.optional(),
-    data: JsonRecordSchema.optional(),
-    side_effect: AgentToolSideEffectSchema.optional()
-  }),
-  z.object({
-    status: z.literal("blocked"),
-    reason: NonEmptyStringSchema,
-    code: NonEmptyStringSchema.optional(),
-    side_effect: z.literal("none").default("none")
-  }),
-  z.object({
-    status: z.literal("failed"),
-    error: NonEmptyStringSchema,
-    code: NonEmptyStringSchema.optional(),
-    result_ref: SourceRefSchema.optional(),
-    side_effect: AgentToolSideEffectSchema.optional()
-  })
-]);
-
-export const AgentToolLifecyclePayloadSchema = z
-  .object({
-    tool_call_id: NonEmptyStringSchema,
-    tool_name: NonEmptyStringSchema,
-    result: AgentResultEnvelopeSchema.optional()
-  })
-  .passthrough();
 
 export const AgentToolCallRecordSchema = z
   .object({
@@ -268,9 +212,6 @@ const AgentProposalBaseSchema = z
     artifact_ref: AgentArtifactRefSchema.refine(
       (ref) => ref.kind === "proposal",
       "proposal artifacts must use proposal artifact refs"
-    ).refine(
-      (ref) => ProposalObjectRefSchema.safeParse(ref.uri).success,
-      "proposal artifacts must point at proposal object storage"
     ),
     promotion_event_ref: SourceRefSchema.optional()
   })
@@ -375,11 +316,8 @@ export type AgentTurnStatus = z.infer<typeof AgentTurnStatusSchema>;
 export type AgentTurn = z.infer<typeof AgentTurnSchema>;
 export type AgentRuntimeEventType = z.infer<typeof AgentRuntimeEventTypeSchema>;
 export type AgentRuntimeEvent = z.infer<typeof AgentRuntimeEventSchema>;
-export type AgentRuntimeEventMetadata = z.infer<typeof AgentRuntimeEventMetadataSchema>;
 export type AgentToolCallStatus = z.infer<typeof AgentToolCallStatusSchema>;
 export type AgentToolSideEffect = z.infer<typeof AgentToolSideEffectSchema>;
-export type AgentResultEnvelope = z.infer<typeof AgentResultEnvelopeSchema>;
-export type AgentToolLifecyclePayload = z.infer<typeof AgentToolLifecyclePayloadSchema>;
 export type AgentToolCallRecord = z.infer<typeof AgentToolCallRecordSchema>;
 export type AgentProposalStatus = z.infer<typeof AgentProposalStatusSchema>;
 export type ResearchBrief = z.infer<typeof ResearchBriefSchema>;

@@ -7,10 +7,7 @@ import type {
   RiskReview,
   TradeIntent
 } from "@openstrat/domain";
-import type {
-  MarketDataReader,
-  MarketDataSnapshotContext
-} from "@openstrat/market-data";
+import type { MarketDataReader } from "@openstrat/market-data";
 import { SqliteEventLog, type ObjectStore } from "@openstrat/persistence";
 import type { RiskContext, RiskPolicyEngine } from "@openstrat/risk";
 import {
@@ -92,118 +89,15 @@ describe("agent tool gateway", () => {
 
     expect(result.market.canonical_symbol).toBe("ETH-PERP");
     expect(result.latest_price.value).toBe(3500);
-    expect(result.dataset_ref).toBe(
-      "datasets/hyperliquid/ETH-PERP/2026-06-05T00-00-00.000Z.json"
-    );
-    expect(result.source_provenance).toMatchObject({
-      source_kind: "public_ledger",
-      public_ledger: true,
-      replayable: true
-    });
     expect(events.list("agent_sessions/agent_session_001")).toMatchObject([
       {
         type: "agent.tool_call.completed",
         payload: {
           tool_name: "market_data.read_snapshot",
-          result: {
-            status: "completed",
-            result_ref: "datasets/hyperliquid/ETH-PERP/2026-06-05T00-00-00.000Z.json",
-            side_effect: "none"
-          },
           side_effect: "none"
         }
       }
     ]);
-  });
-
-  it("dispatches supported invoke calls through typed gateway methods", async () => {
-    const { events, gateway } = createGatewayFixture();
-
-    const result = await gateway.invoke({
-      tool_name: "market_data.read_snapshot",
-      call_id: "tool_call_invoke_market",
-      session_id: "agent_session_001",
-      turn_id: "turn_001",
-      arguments: {
-        canonical_symbol: "ETH-PERP"
-      }
-    });
-
-    expect(result).toMatchObject({
-      market: {
-        canonical_symbol: "ETH-PERP"
-      },
-      latest_price: {
-        value: 3500
-      },
-      dataset_ref: "datasets/hyperliquid/ETH-PERP/2026-06-05T00-00-00.000Z.json"
-    });
-    expect(events.list("agent_sessions/agent_session_001").at(-1)).toMatchObject({
-      type: "agent.tool_call.completed",
-      payload: {
-        tool_call_id: "tool_call_invoke_market",
-        tool_name: "market_data.read_snapshot",
-        result: {
-          status: "completed",
-          result_ref: "datasets/hyperliquid/ETH-PERP/2026-06-05T00-00-00.000Z.json",
-          side_effect: "none"
-        },
-        side_effect: "none"
-      }
-    });
-  });
-
-  it("dispatches proposal invoke calls through typed gateway methods", async () => {
-    const { events, gateway, objects } = createGatewayFixture();
-
-    const result = await gateway.invoke({
-      tool_name: "strategy_patch.capture",
-      call_id: "tool_call_invoke_strategy",
-      session_id: "agent_session_001",
-      turn_id: "turn_001",
-      arguments: {
-        proposal: {
-          id: "strategy_patch_invoke_001",
-          created_at: now,
-          session_id: "agent_session_001",
-          status: "proposed",
-          strategy_id: "eth_breakout",
-          base_strategy_version: "0.1.0",
-          patch_format: "unified_diff",
-          patch_ref: "agent-artifacts/strategy_patch_invoke_001.diff",
-          rationale: "Route Pi strategy work through proposal capture.",
-          artifact_ref: proposalRef("strategy_patch_invoke_001")
-        }
-      }
-    });
-
-    expect(result).toMatchObject({
-      id: "strategy_patch_invoke_001",
-      status: "proposed",
-      artifact_ref: {
-        uri: "agent-artifacts/strategy_patch_invoke_001.json"
-      }
-    });
-    expect(objects.exists("agent-artifacts/strategy_patch_invoke_001.json")).toBe(true);
-    expect(events.list("agent_sessions/agent_session_001")).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "agent.proposal.captured",
-          payload: expect.objectContaining({
-            tool_name: "strategy_patch.capture",
-            artifact_ref: "agent-artifacts/strategy_patch_invoke_001.json"
-          })
-        }),
-        expect.objectContaining({
-          type: "agent.tool_call.completed",
-          payload: expect.objectContaining({
-            tool_call_id: "tool_call_invoke_strategy",
-            tool_name: "strategy_patch.capture",
-            result_ref: "agent-artifacts/strategy_patch_invoke_001.json"
-          })
-        })
-      ])
-    );
   });
 
   it("captures backtest, strategy, and memory proposals as append-only artifacts", async () => {
@@ -343,11 +237,6 @@ describe("agent tool gateway", () => {
       type: "agent.tool_call.blocked",
       payload: {
         tool_name: "orders.write_live",
-        result: {
-          status: "blocked",
-          reason: "tool is not available through the harness-owned agent gateway",
-          side_effect: "none"
-        },
         side_effect: "none"
       }
     });
@@ -389,50 +278,6 @@ class StubMarketDataReader implements MarketDataReader {
       stale_after_ms: 5000,
       confidence: 0.99,
       raw_ref: "market-data/hyperliquid/eth/latest.json"
-    };
-  }
-
-  async getLatestDataset(): Promise<MarketDataSnapshotContext> {
-    return {
-      dataset_ref: "datasets/hyperliquid/ETH-PERP/2026-06-05T00-00-00.000Z.json",
-      registry_ref: "normalized/hyperliquid/registry/2026-06-05T00-00-00.000Z.json",
-      latest_price_ref:
-        "normalized/hyperliquid/mark-prices/ETH-PERP/2026-06-05T00-00-00.000Z.json",
-      raw_refs: [
-        {
-          ref: "raw/hyperliquid/meta-and-asset-ctxs/2026-06-05T00-00-00.000Z.json",
-          kind: "meta_and_asset_contexts",
-          source: "hyperliquid",
-          venue: "hyperliquid",
-          captured_at: now,
-          request: { type: "metaAndAssetCtxs" },
-          immutable: true
-        }
-      ],
-      normalized_refs: [
-        {
-          ref: "normalized/hyperliquid/mark-prices/ETH-PERP/2026-06-05T00-00-00.000Z.json",
-          family: "mark_prices",
-          canonical_symbol: "ETH-PERP",
-          source: "hyperliquid",
-          venue: "hyperliquid",
-          created_at: now,
-          raw_refs: [
-            "raw/hyperliquid/meta-and-asset-ctxs/2026-06-05T00-00-00.000Z.json"
-          ],
-          immutable: true
-        }
-      ],
-      freshness: {
-        as_of: now,
-        stale_after_ms: 5000
-      },
-      source_provenance: {
-        source_kind: "public_ledger",
-        public_ledger: true,
-        replayable: true,
-        verification_refs: ["https://hyperliquid.gitbook.io/hyperliquid-docs/"]
-      }
     };
   }
 

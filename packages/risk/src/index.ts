@@ -354,6 +354,8 @@ function allowedIntentModes(policyMode: RiskPolicy["mode"]): TradeIntent["mode"]
     case "constrained_live":
     case "adaptive_management":
       return ["research", "paper", "draft", "live"];
+    default:
+      throw new Error(`Unsupported risk policy mode: ${policyMode}`);
   }
 }
 

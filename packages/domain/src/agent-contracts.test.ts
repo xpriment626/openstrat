@@ -2,28 +2,20 @@ import { describe, expect, it } from "vitest";
 import {
   AgentArtifactRefSchema,
   AgentRuntimeEventSchema,
-  AgentRuntimeEventMetadataSchema,
-  AgentResultEnvelopeSchema,
   AgentSessionManifestSchema,
   AgentToolCallRecordSchema,
   AgentToolGrantSchema,
-  AgentToolLifecyclePayloadSchema,
   AgentTurnSchema,
   BacktestRequestSchema,
   BacktestReportRefSchema,
-  CanonicalObjectRefSchema,
   DecisionLedgerEntrySchema,
   DeploymentProposalSchema,
-  ObjectRefSchema,
-  ProposalObjectRefSchema,
   MemoryProposalSchema,
   ResearchBriefSchema,
   RiskValidationRequestSchema,
   StrategyManifestSchema,
   StrategyPatchProposalSchema,
-  TradeIntentSchema,
-  isCanonicalObjectRef,
-  isProposalObjectRef
+  TradeIntentSchema
 } from "./index.js";
 
 const now = "2026-06-05T00:00:00.000Z";
@@ -72,60 +64,6 @@ describe("agent domain contracts", () => {
     ).toBe(false);
   });
 
-  it("distinguishes Pi and Codex app-server runtime ownership", () => {
-    expect(
-      AgentSessionManifestSchema.safeParse({
-        id: "agent_session_codex_001",
-        created_at: now,
-        purpose: "strategy_research",
-        autonomy_mode: "strategy_workbench",
-        runtime: {
-          kind: "codex_app_server",
-          adapter: "@openstrat/agent-runtime/codex-app-server",
-          model_profile_id: "model/openai-codex-subscription",
-          provider: "openai-codex",
-          model: "gpt-5.5"
-        },
-        transcript_ref: {
-          id: "artifact_transcript_codex_001",
-          kind: "agent_transcript",
-          uri: "agent-sessions/agent_session_codex_001/session.jsonl",
-          content_hash: "sha256:transcript",
-          created_at: now,
-          append_only: true
-        },
-        event_stream_id: "agent_sessions/agent_session_codex_001",
-        canonical_ledger_refs: []
-      }).success
-    ).toBe(true);
-
-    expect(
-      AgentSessionManifestSchema.safeParse({
-        id: "agent_session_codex_bad_provider",
-        created_at: now,
-        purpose: "strategy_research",
-        autonomy_mode: "strategy_workbench",
-        runtime: {
-          kind: "codex_app_server",
-          adapter: "@openstrat/agent-runtime/codex-app-server",
-          model_profile_id: "model/openrouter/anthropic/claude",
-          provider: "openrouter",
-          model: "anthropic/claude-sonnet-4-5"
-        },
-        transcript_ref: {
-          id: "artifact_transcript_codex_bad_provider",
-          kind: "agent_transcript",
-          uri: "agent-sessions/agent_session_codex_bad_provider/session.jsonl",
-          content_hash: "sha256:transcript",
-          created_at: now,
-          append_only: true
-        },
-        event_stream_id: "agent_sessions/agent_session_codex_bad_provider",
-        canonical_ledger_refs: []
-      }).success
-    ).toBe(false);
-  });
-
   it("validates runtime events, turns, grants, and tool call records", () => {
     expect(
       AgentToolGrantSchema.safeParse({
@@ -165,15 +103,6 @@ describe("agent domain contracts", () => {
     ).toBe(true);
 
     expect(
-      AgentRuntimeEventMetadataSchema.safeParse({
-        transcript_ref: "agent-runtime/sessions/agent_session_001.jsonl",
-        runtime: "codex_app_server",
-        runtime_session_id: "codex_app_server_agent_session_001",
-        codex_thread_id: "codex_thread_agent_session_001"
-      }).success
-    ).toBe(true);
-
-    expect(
       AgentToolCallRecordSchema.safeParse({
         id: "tool_call_001",
         session_id: "agent_session_001",
@@ -198,49 +127,6 @@ describe("agent domain contracts", () => {
         status: "completed",
         requested_at: now,
         side_effect: "live_execution"
-      }).success
-    ).toBe(false);
-
-    expect(
-      AgentResultEnvelopeSchema.safeParse({
-        status: "completed",
-        result_ref: "agent-artifacts/tool_call_001.result.json",
-        side_effect: "none"
-      }).success
-    ).toBe(true);
-
-    expect(
-      AgentResultEnvelopeSchema.safeParse({
-        status: "blocked",
-        reason: "tool is not enabled",
-        side_effect: "none"
-      }).success
-    ).toBe(true);
-
-    expect(
-      AgentResultEnvelopeSchema.safeParse({
-        status: "failed",
-        error: "market data reader failed",
-        side_effect: "none"
-      }).success
-    ).toBe(true);
-
-    expect(
-      AgentToolLifecyclePayloadSchema.safeParse({
-        tool_call_id: "tool_call_001",
-        tool_name: "market_data.read_snapshot",
-        result: {
-          status: "blocked",
-          reason: "tool is not enabled",
-          side_effect: "none"
-        }
-      }).success
-    ).toBe(true);
-
-    expect(
-      AgentResultEnvelopeSchema.safeParse({
-        status: "blocked",
-        side_effect: "none"
       }).success
     ).toBe(false);
   });
@@ -278,24 +164,6 @@ describe("agent domain contracts", () => {
     ).toBe(true);
 
     expect(
-      ResearchBriefSchema.safeParse({
-        id: "research_brief_bad_ref",
-        created_at: now,
-        session_id: "agent_session_001",
-        status: "proposed",
-        title: "Bad artifact ref",
-        question: "Can a proposal artifact point at canonical storage?",
-        summary: "It should not.",
-        evidence_refs: ["market-data/hyperliquid/eth/candles.jsonl"],
-        artifact_ref: {
-          ...ref,
-          id: "artifact_research_bad_ref",
-          uri: "datasets/hyperliquid/eth/canonical.json"
-        }
-      }).success
-    ).toBe(false);
-
-    expect(
       BacktestRequestSchema.safeParse({
         id: "backtest_request_001",
         created_at: now,
@@ -331,61 +199,6 @@ describe("agent domain contracts", () => {
         }
       }).success
     ).toBe(true);
-  });
-
-  it("classifies object refs by storage role before persistence touches disk", () => {
-    expect(
-      ObjectRefSchema.safeParse("datasets/hyperliquid/BTC-PERP/day.json").success
-    ).toBe(true);
-    expect(
-      ProposalObjectRefSchema.safeParse("agent-artifacts/session/p1.json").success
-    ).toBe(true);
-    expect(
-      ProposalObjectRefSchema.safeParse("scratch/session/patch.bundle.json").success
-    ).toBe(true);
-    expect(
-      ProposalObjectRefSchema.safeParse(
-        "projects/project_001/agent-artifacts/session/p1.json"
-      ).success
-    ).toBe(true);
-    expect(
-      ProposalObjectRefSchema.safeParse(
-        "projects/project_001/scratch/session/patch.bundle.json"
-      ).success
-    ).toBe(true);
-    expect(
-      CanonicalObjectRefSchema.safeParse("backtests/run_001/report.json").success
-    ).toBe(true);
-
-    for (const ref of [
-      "../escape.json",
-      "/tmp/escape.json",
-      "C:\\tmp\\escape.json",
-      "datasets//bad.json",
-      "datasets/./bad.json",
-      "datasets/../bad.json",
-      "."
-    ]) {
-      expect(ObjectRefSchema.safeParse(ref).success).toBe(false);
-    }
-
-    expect(
-      ProposalObjectRefSchema.safeParse("datasets/hyperliquid/BTC-PERP/day.json")
-        .success
-    ).toBe(false);
-    expect(
-      CanonicalObjectRefSchema.safeParse("agent-artifacts/session/p1.json").success
-    ).toBe(false);
-    expect(
-      CanonicalObjectRefSchema.safeParse(
-        "projects/project_001/agent-artifacts/session/p1.json"
-      ).success
-    ).toBe(false);
-    expect(isProposalObjectRef("scratch/session/patch.bundle.json")).toBe(true);
-    expect(
-      isProposalObjectRef("projects/project_001/scratch/session/patch.bundle.json")
-    ).toBe(true);
-    expect(isCanonicalObjectRef("datasets/hyperliquid/BTC-PERP/day.json")).toBe(true);
   });
 
   it("keeps strategy, risk, memory, and deployment proposals non-promoted by default", () => {

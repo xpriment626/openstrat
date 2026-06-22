@@ -15,8 +15,6 @@
     "noUncheckedIndexedAccess": true,
     "paths": {
       "@openstrat/backtesting": ["./packages/backtesting/src/index.ts"],
-      "@openstrat/agent-runtime": ["./packages/agent-runtime/src/index.ts"],
-      "@openstrat/cli": ["./packages/cli/src/index.ts"],
       "@openstrat/domain": ["./packages/domain/src/index.ts"],
       "@openstrat/market-data": ["./packages/market-data/src/index.ts"],
       "@openstrat/persistence": ["./packages/persistence/src/index.ts"],

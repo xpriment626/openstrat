@@ -10,7 +10,6 @@
   "exclude": ["dist", "node_modules", "src/**/*.test.ts"],
   "references": [
     { "path": "../domain" },
-    { "path": "../market-data" },
     { "path": "../persistence" },
     { "path": "../strategy-sdk" }
   ]

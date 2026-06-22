@@ -1,5 +1,4 @@
 import {
-  AgentResultEnvelopeSchema,
   AgentToolCallRecordSchema,
   BacktestRequestSchema,
   DeploymentGateSchema,
@@ -18,16 +17,17 @@ import {
 import type { MarketDataReader } from "@openstrat/market-data";
 import type { EventLogRepository, ObjectStore } from "@openstrat/persistence";
 import type { RiskContext, RiskPolicyEngine } from "@openstrat/risk";
-import {
-  AGENT_TOOL_GATEWAY_TOOLS,
-  agentToolGatewayToolDefinition,
-  isAgentToolGatewayToolName,
-  type AgentToolGatewayToolName,
-  type ReadMarketDataSnapshotToolOutput
-} from "./agent-tool-registry.js";
 
-export { AGENT_TOOL_GATEWAY_TOOLS } from "./agent-tool-registry.js";
-export type { AgentToolGatewayToolName } from "./agent-tool-registry.js";
+export const AGENT_TOOL_GATEWAY_TOOLS = [
+  "market_data.read_snapshot",
+  "backtest.request",
+  "risk.validate_intent",
+  "strategy_patch.capture",
+  "memory_proposal.capture",
+  "deployment_gate.inspect"
+] as const;
+
+export type AgentToolGatewayToolName = (typeof AGENT_TOOL_GATEWAY_TOOLS)[number];
 
 export interface AgentToolGatewayDependencies {
   events: EventLogRepository;
@@ -85,9 +85,10 @@ export interface InvokeAgentToolInput extends AgentToolInvocationBase {
 
 export interface AgentToolGateway {
   readonly tool_names: readonly AgentToolGatewayToolName[];
-  readMarketDataSnapshot(
-    input: ReadMarketDataSnapshotInput
-  ): Promise<ReadMarketDataSnapshotToolOutput>;
+  readMarketDataSnapshot(input: ReadMarketDataSnapshotInput): Promise<{
+    market: NonNullable<Awaited<ReturnType<MarketDataReader["getMarket"]>>>;
+    latest_price: Awaited<ReturnType<MarketDataReader["getLatestPrice"]>>;
+  }>;
   captureBacktestRequest(input: CaptureBacktestRequestInput): Promise<BacktestRequest>;
   validateRisk(input: ValidateRiskInput): Promise<RiskReview>;
   captureStrategyPatchProposal(
@@ -122,26 +123,12 @@ export function createAgentToolGateway(
         ...(input.source ? { source: input.source } : {}),
         ...(input.venue ? { venue: input.venue } : {})
       });
-      const datasetContext = await dependencies.marketData.getLatestDataset?.({
-        canonical_symbol: input.canonical_symbol,
-        ...(input.source ? { source: input.source } : {}),
-        ...(input.venue ? { venue: input.venue } : {})
-      });
-      const output = agentToolGatewayToolDefinition(
-        "market_data.read_snapshot"
-      ).output_schema.parse({
-        market,
-        latest_price: latestPrice,
-        ...datasetContext,
-        latest_price_ref: datasetContext?.latest_price_ref ?? latestPrice.raw_ref
-      });
 
       recordToolCompleted(dependencies, now(), input, "market_data.read_snapshot", {
-        side_effect: sideEffectFor("market_data.read_snapshot"),
-        result_ref:
-          output.dataset_ref ?? output.latest_price_ref ?? market.source_refs[0]
+        side_effect: "none",
+        result_ref: latestPrice.raw_ref ?? market.source_refs[0]
       });
-      return output;
+      return { market, latest_price: latestPrice };
     },
 
     async captureBacktestRequest(input) {
@@ -149,7 +136,7 @@ export function createAgentToolGateway(
       writeProposalArtifact(dependencies.objects, request.artifact_ref.uri, request);
       recordProposalCaptured(dependencies, now(), input, "backtest.request", request);
       recordToolCompleted(dependencies, now(), input, "backtest.request", {
-        side_effect: sideEffectFor("backtest.request"),
+        side_effect: "proposal_written",
         result_ref: request.artifact_ref.uri
       });
       return request;
@@ -160,7 +147,7 @@ export function createAgentToolGateway(
       const policy = RiskPolicySchema.parse(input.policy);
       const review = await dependencies.risk.review(intent, policy, input.context);
       recordToolCompleted(dependencies, now(), input, "risk.validate_intent", {
-        side_effect: sideEffectFor("risk.validate_intent"),
+        side_effect: "event_logged",
         result_ref: review.id,
         status: review.status
       });
@@ -178,7 +165,7 @@ export function createAgentToolGateway(
         proposal
       );
       recordToolCompleted(dependencies, now(), input, "strategy_patch.capture", {
-        side_effect: sideEffectFor("strategy_patch.capture"),
+        side_effect: "proposal_written",
         result_ref: proposal.artifact_ref.uri
       });
       return proposal;
@@ -195,7 +182,7 @@ export function createAgentToolGateway(
         proposal
       );
       recordToolCompleted(dependencies, now(), input, "memory_proposal.capture", {
-        side_effect: sideEffectFor("memory_proposal.capture"),
+        side_effect: "proposal_written",
         result_ref: proposal.artifact_ref.uri
       });
       return proposal;
@@ -211,7 +198,7 @@ export function createAgentToolGateway(
         required_reviews: gate.required_reviews
       };
       recordToolCompleted(dependencies, now(), input, "deployment_gate.inspect", {
-        side_effect: sideEffectFor("deployment_gate.inspect"),
+        side_effect: "none",
         result_ref: gate.id,
         ready: inspection.ready
       });
@@ -226,79 +213,9 @@ export function createAgentToolGateway(
         throw new Error(`tool is not available: ${input.tool_name}`);
       }
 
-      if (input.tool_name === "market_data.read_snapshot") {
-        const args = agentToolGatewayToolDefinition(
-          "market_data.read_snapshot"
-        ).input_schema.parse(input.arguments);
-        return gateway.readMarketDataSnapshot({
-          call_id: input.call_id,
-          session_id: input.session_id,
-          turn_id: input.turn_id,
-          canonical_symbol: args.canonical_symbol,
-          ...(args.source ? { source: args.source } : {}),
-          ...(args.venue ? { venue: args.venue } : {})
-        });
-      }
-
-      if (input.tool_name === "backtest.request") {
-        const args = agentToolGatewayToolDefinition(
-          "backtest.request"
-        ).input_schema.parse(input.arguments);
-        return gateway.captureBacktestRequest({
-          call_id: input.call_id,
-          session_id: input.session_id,
-          turn_id: input.turn_id,
-          request: args.request
-        });
-      }
-
-      if (input.tool_name === "risk.validate_intent") {
-        const args = agentToolGatewayToolDefinition(
-          "risk.validate_intent"
-        ).input_schema.parse(input.arguments);
-        return gateway.validateRisk({
-          call_id: input.call_id,
-          session_id: input.session_id,
-          turn_id: input.turn_id,
-          intent: args.intent,
-          policy: args.policy,
-          context: args.context
-        });
-      }
-
-      if (input.tool_name === "strategy_patch.capture") {
-        const args = agentToolGatewayToolDefinition(
-          "strategy_patch.capture"
-        ).input_schema.parse(input.arguments);
-        return gateway.captureStrategyPatchProposal({
-          call_id: input.call_id,
-          session_id: input.session_id,
-          turn_id: input.turn_id,
-          proposal: args.proposal
-        });
-      }
-
-      if (input.tool_name === "memory_proposal.capture") {
-        const args = agentToolGatewayToolDefinition(
-          "memory_proposal.capture"
-        ).input_schema.parse(input.arguments);
-        return gateway.captureMemoryProposal({
-          call_id: input.call_id,
-          session_id: input.session_id,
-          turn_id: input.turn_id,
-          proposal: args.proposal
-        });
-      }
-
-      const args = agentToolGatewayToolDefinition(
-        "deployment_gate.inspect"
-      ).input_schema.parse(input.arguments);
-      return gateway.inspectDeploymentGate({
-        call_id: input.call_id,
-        session_id: input.session_id,
-        turn_id: input.turn_id,
-        gate: args.gate
-      });
+      throw new Error(
+        `direct invocation for ${input.tool_name} requires the typed gateway method`
+      );
     }
   };
 
@@ -331,11 +248,7 @@ function inspectGateMissingRequirements(gate: DeploymentGate): string[] {
 }
 
 function isSupportedTool(toolName: string): toolName is AgentToolGatewayToolName {
-  return isAgentToolGatewayToolName(toolName);
-}
-
-function sideEffectFor(toolName: AgentToolGatewayToolName) {
-  return agentToolGatewayToolDefinition(toolName).side_effect;
+  return AGENT_TOOL_GATEWAY_TOOLS.includes(toolName as AgentToolGatewayToolName);
 }
 
 function recordProposalCaptured(
@@ -386,12 +299,6 @@ function recordToolCompleted(
         : `${toolName}:${input.call_id}`,
     side_effect: payload.side_effect
   });
-  const result = AgentResultEnvelopeSchema.parse({
-    status: "completed",
-    output_ref: record.output_ref,
-    result_ref: record.output_ref,
-    side_effect: payload.side_effect
-  });
 
   dependencies.events.append({
     stream_id: streamId(input.session_id),
@@ -399,7 +306,6 @@ function recordToolCompleted(
     occurred_at: occurredAt,
     payload: {
       ...payload,
-      result,
       tool_call: record,
       tool_call_id: input.call_id,
       tool_name: toolName
@@ -426,12 +332,6 @@ function recordToolFailure(
     error: typeof payload.error === "string" ? payload.error : "tool failed",
     side_effect: "none"
   });
-  const error = typeof payload.error === "string" ? payload.error : "tool failed";
-  const result = AgentResultEnvelopeSchema.parse({
-    status: "failed",
-    error,
-    side_effect: "none"
-  });
 
   dependencies.events.append({
     stream_id: streamId(input.session_id),
@@ -439,7 +339,6 @@ function recordToolFailure(
     occurred_at: occurredAt,
     payload: {
       ...payload,
-      result,
       tool_call: record,
       tool_call_id: input.call_id,
       tool_name: toolName,
@@ -467,12 +366,6 @@ function recordToolBlocked(
     error: typeof payload.reason === "string" ? payload.reason : "tool blocked",
     side_effect: "none"
   });
-  const reason = typeof payload.reason === "string" ? payload.reason : "tool blocked";
-  const result = AgentResultEnvelopeSchema.parse({
-    status: "blocked",
-    reason,
-    side_effect: "none"
-  });
 
   dependencies.events.append({
     stream_id: streamId(input.session_id),
@@ -480,7 +373,6 @@ function recordToolBlocked(
     occurred_at: occurredAt,
     payload: {
       ...payload,
-      result,
       tool_call: record,
       tool_call_id: input.call_id,
       tool_name: toolName,

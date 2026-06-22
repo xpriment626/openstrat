@@ -7,7 +7,6 @@ import { FileObjectStore } from "@openstrat/persistence";
 import {
   CandleSchema,
   FundingRateSnapshotSchema,
-  MarketDatasetManifestSchema,
   MarketDatumSchema,
   MarketRegistryEntrySchema,
   OrderbookSnapshotSchema
@@ -15,14 +14,12 @@ import {
 import {
   HyperliquidInfoClient,
   deriveHyperliquidMarketRegistry,
-  hyperliquidVenueCapability,
   ingestHyperliquidWindow,
   normalizeHyperliquidCandleSnapshot,
   normalizeHyperliquidFundingHistory,
   normalizeHyperliquidL2Book,
   normalizeHyperliquidMetaAndAssetCtxs
 } from "./index.js";
-import { validateMarketDataset } from "../datasets.js";
 
 const receivedAt = "2026-06-04T00:00:00.000Z";
 
@@ -33,30 +30,6 @@ function readFixture<T>(name: string): T {
 }
 
 describe("Hyperliquid read-only adapter", () => {
-  it("declares public-ledger venue capabilities without write actions", () => {
-    const capability = hyperliquidVenueCapability();
-
-    expect(capability).toMatchObject({
-      source: "hyperliquid",
-      venue: "hyperliquid",
-      source_kind: "public_ledger",
-      public_ledger: true,
-      replayable: true
-    });
-    expect(capability.acquisition_methods).toEqual(
-      expect.arrayContaining(["fixture", "guarded_live", "historical_backfill"])
-    );
-    expect(capability.record_families).toEqual(
-      expect.arrayContaining([
-        "market_registry",
-        "mark_prices",
-        "candles",
-        "funding_rates",
-        "orderbook_snapshots"
-      ])
-    );
-  });
-
   it("posts only info endpoint read requests with typed request wrappers", async () => {
     const calls: unknown[] = [];
     const client = new HyperliquidInfoClient({
@@ -231,39 +204,17 @@ describe("Hyperliquid registry and historical ingest", () => {
       interval: "15m",
       start_time_ms: 1681923600000,
       end_time_ms: 1681927200000,
-      received_at: receivedAt,
-      acquisition_method: "guarded_live"
+      received_at: receivedAt
     });
 
     expect(result.registry_ref).toBe(
       "normalized/hyperliquid/registry/2026-06-04T00-00-00.000Z.json"
     );
-    expect(result.dataset_ref).toBe(
-      "datasets/hyperliquid/BTC-PERP/2026-06-04T00-00-00.000Z.json"
-    );
-    expect(result.latest_price_ref).toBe(
-      "normalized/hyperliquid/mark-prices/BTC-PERP/2026-06-04T00-00-00.000Z.json"
-    );
     expect(result.candle_refs).toHaveLength(1);
     expect(result.funding_refs).toHaveLength(1);
     expect(result.orderbook_refs).toHaveLength(1);
-    expect(result.price_refs).toEqual([result.latest_price_ref]);
     expect(store.exists(result.raw_refs.meta_and_asset_ctxs)).toBe(true);
     expect(store.exists(result.raw_refs.candles)).toBe(true);
-    expect(store.exists(result.dataset_ref)).toBe(true);
-    expect(store.exists(result.latest_price_ref)).toBe(true);
-    expect(MarketDatasetManifestSchema.safeParse(result.dataset_manifest).success).toBe(
-      true
-    );
-    expect(result.dataset_manifest.source_provenance).toMatchObject({
-      source_kind: "public_ledger",
-      public_ledger: true,
-      replayable: true
-    });
-    expect(result.dataset_manifest.acquisition).toMatchObject({
-      method: "guarded_live",
-      deterministic: false
-    });
     expect(store.getJson(result.candle_refs[0])).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -272,44 +223,5 @@ describe("Hyperliquid registry and historical ingest", () => {
         })
       ])
     );
-    expect(store.getJson(result.latest_price_ref)).toMatchObject({
-      canonical_symbol: "BTC-PERP",
-      method: "mark",
-      raw_ref: result.raw_refs.meta_and_asset_ctxs
-    });
-    expect(
-      store.getJson("indexes/market-datasets/hyperliquid/hyperliquid/BTC-PERP.json")
-    ).toEqual([
-      expect.objectContaining({
-        dataset_ref: result.dataset_ref,
-        canonical_symbol: "BTC-PERP",
-        acquisition_method: "guarded_live"
-      })
-    ]);
-    expect(
-      validateMarketDataset(store, result.dataset_ref, {
-        as_of: "2026-06-04T00:00:04.000Z",
-        canonical_symbol: "BTC-PERP",
-        source: "hyperliquid",
-        venue: "hyperliquid",
-        required_families: [
-          "market_registry",
-          "mark_prices",
-          "candles",
-          "funding_rates",
-          "orderbook_snapshots"
-        ]
-      })
-    ).toMatchObject({
-      valid: true,
-      missing_requirements: [],
-      families: [
-        "market_registry",
-        "mark_prices",
-        "candles",
-        "funding_rates",
-        "orderbook_snapshots"
-      ]
-    });
   });
 });

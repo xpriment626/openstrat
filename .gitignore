@@ -1,12 +1,7 @@
 .DS_Store
-.openstrat/
 coverage/
 node_modules/
 packages/*/dist/
 packages/*/node_modules/
 docs/
-checkpoints/
-goal-runs/
 AGENTS.md
-checkpoint/
-openstrat-*.tgz

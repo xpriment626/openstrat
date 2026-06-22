@@ -52,10 +52,6 @@ export const BacktestReportSchema = z
     generated_at: IsoDateTimeSchema,
     metrics: BacktestMetricsSchema,
     trade_ledger_ref: SourceRefSchema,
-    intent_ledger_ref: SourceRefSchema.optional(),
-    equity_curve_ref: SourceRefSchema.optional(),
-    diagnostics_ref: SourceRefSchema.optional(),
-    summary_ref: SourceRefSchema.optional(),
     artifact_refs: z.array(SourceRefSchema).default([]),
     warnings: z.array(NonEmptyStringSchema).default([])
   })

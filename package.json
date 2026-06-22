@@ -1,5 +1,5 @@
 {
-  "name": "openstrat-monorepo",
+  "name": "openstrat",
   "version": "0.0.0",
   "private": true,
   "type": "module",

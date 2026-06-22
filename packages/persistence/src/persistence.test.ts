@@ -128,14 +128,7 @@ describe("FileObjectStore", () => {
   it("rejects refs that escape the store root", () => {
     const store = new FileObjectStore(join(tempDir, "objects"));
 
-    expect(() => store.putJson("../escape.json", {})).toThrow(
-      /object refs must be relative/
-    );
-    expect(() => store.putJson("/tmp/escape.json", {})).toThrow(
-      /object refs must be relative/
-    );
-    expect(() => store.putJson("raw\\escape.json", {})).toThrow(
-      /object refs must be relative/
-    );
+    expect(() => store.putJson("../escape.json", {})).toThrow(/escapes store root/);
+    expect(() => store.putJson("/tmp/escape.json", {})).toThrow(/Invalid object ref/);
   });
 });

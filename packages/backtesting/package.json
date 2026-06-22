@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@openstrat/domain": "workspace:*",
-    "@openstrat/market-data": "workspace:*",
     "@openstrat/persistence": "workspace:*",
     "@openstrat/strategy-sdk": "workspace:*"
   }
