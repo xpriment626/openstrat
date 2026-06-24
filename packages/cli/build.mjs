@@ -9,6 +9,7 @@ await build({
     "@modelcontextprotocol/sdk/*",
     "@openai/codex",
     "@openai/codex-sdk",
+    "esbuild",
     "zod"
   ],
   format: "esm",
@@ -21,7 +22,27 @@ await build({
 const binPath = join("dist", "openstrat");
 writeFileSync(
   binPath,
-  '#!/usr/bin/env node\nimport { runProcessCli } from "./index.js";\nawait runProcessCli();\n',
+  `#!/usr/bin/env node
+const emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const message =
+    typeof warning === "string"
+      ? warning
+      : warning instanceof Error
+        ? warning.message
+        : "";
+  const type = typeof args[0] === "string" ? args[0] : undefined;
+  if (
+    type === "ExperimentalWarning" &&
+    message.includes("SQLite is an experimental feature")
+  ) {
+    return;
+  }
+  return emitWarning(warning, ...args);
+};
+const { runProcessCli } = await import("./index.js");
+await runProcessCli();
+`,
   "utf8"
 );
 chmodSync(binPath, 0o755);

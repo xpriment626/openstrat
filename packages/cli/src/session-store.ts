@@ -44,8 +44,18 @@ export interface ArtifactIndexEntry {
     | "codex_command_execution"
     | "codex_file_change"
     | "codex_mcp_tool_call"
+    | "backtest_plan"
+    | "backtest_report"
+    | "market_catalog"
+    | "dataset_ingest_result"
+    | "dataset_ingestion_plan"
+    | "dataset_inspection"
+    | "dataset_validation"
+    | "risk_preflight"
     | "slash_command_result"
     | "session_summary"
+    | "strategy_authoring_guide"
+    | "strategy_validation"
     | "error";
   ref?: string;
   summary: string;

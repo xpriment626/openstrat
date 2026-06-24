@@ -234,10 +234,65 @@ export const OPENSTRAT_CODEX_BASELINE_CONTRACT = {
       output_artifact_kinds: ["market_snapshot"]
     },
     {
+      name: "dataset.plan_ingestion",
+      capability: "dataset_provenance",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["dataset_ingestion_plan"]
+    },
+    {
+      name: "dataset.execute_ingestion",
+      capability: "market_data",
+      side_effect: "external_read",
+      requires_human_approval: true,
+      output_artifact_kinds: ["dataset_ingest_result"]
+    },
+    {
+      name: "dataset.validate",
+      capability: "dataset_provenance",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["dataset_validation"]
+    },
+    {
+      name: "dataset.inspect",
+      capability: "dataset_provenance",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["dataset_inspection"]
+    },
+    {
+      name: "strategy.guide",
+      capability: "strategy_workspace",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["strategy_authoring_guide"]
+    },
+    {
+      name: "strategy.validate",
+      capability: "strategy_validation",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["strategy_validation"]
+    },
+    {
+      name: "backtest.plan",
+      capability: "backtesting",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["backtest_plan"]
+    },
+    {
+      name: "backtest.run",
+      capability: "backtesting",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["backtest_report"]
+    },
+    {
       name: "backtest.request",
       capability: "backtesting",
       side_effect: "project_artifact_write",
       output_artifact_kinds: ["backtest_request"]
+    },
+    {
+      name: "risk.preflight",
+      capability: "risk_policy",
+      side_effect: "project_artifact_write",
+      output_artifact_kinds: ["risk_preflight"]
     },
     {
       name: "risk.validate_intent",

@@ -17,8 +17,13 @@ export interface OpenStratCliHome {
   sessionsDir: string;
   transcriptsDir: string;
   artifactsDir: string;
+  backtestsDir: string;
+  datasetsDir: string;
   summariesDir: string;
   logsDir: string;
+  objectsDir: string;
+  riskDir: string;
+  strategiesDir: string;
 }
 
 export interface ResolveHomeOptions {
@@ -50,8 +55,13 @@ export function resolveOpenStratCliHome(options: ResolveHomeOptions): OpenStratC
     sessionsDir: join(projectRoot, "sessions"),
     transcriptsDir: join(projectRoot, "transcripts"),
     artifactsDir: join(projectRoot, "artifacts"),
+    backtestsDir: join(projectRoot, "backtests"),
+    datasetsDir: join(projectRoot, "datasets"),
     summariesDir: join(projectRoot, "summaries"),
-    logsDir: join(projectRoot, "logs")
+    logsDir: join(projectRoot, "logs"),
+    objectsDir: join(projectRoot, "objects"),
+    riskDir: join(projectRoot, "risk"),
+    strategiesDir: join(projectRoot, "strategies")
   };
 }
 
@@ -62,8 +72,13 @@ export function ensureOpenStratCliHome(home: OpenStratCliHome): void {
     home.sessionsDir,
     home.transcriptsDir,
     home.artifactsDir,
+    home.backtestsDir,
+    home.datasetsDir,
     home.summariesDir,
-    home.logsDir
+    home.logsDir,
+    home.objectsDir,
+    home.riskDir,
+    home.strategiesDir
   ]) {
     mkdirSync(dir, { recursive: true });
   }

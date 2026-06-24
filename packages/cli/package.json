@@ -27,15 +27,17 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openai/codex": "0.141.0",
     "@openai/codex-sdk": "^0.141.0",
+    "esbuild": "latest",
     "zod": "latest"
   },
   "devDependencies": {
+    "@openstrat/backtesting": "workspace:*",
     "@openstrat/domain": "workspace:*",
     "@openstrat/market-data": "workspace:*",
     "@openstrat/persistence": "workspace:*",
     "@openstrat/risk": "workspace:*",
-    "@openstrat/workers": "workspace:*",
-    "esbuild": "latest"
+    "@openstrat/strategy-sdk": "workspace:*",
+    "@openstrat/workers": "workspace:*"
   },
   "engines": {
     "node": ">=22.19.0"

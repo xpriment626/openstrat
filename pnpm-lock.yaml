@@ -53,19 +53,34 @@ importers:
       '@openai/codex-sdk':
         specifier: ^0.141.0
         version: 0.141.0
+      esbuild:
+        specifier: latest
+        version: 0.28.1
       zod:
         specifier: latest
         version: 4.4.3
     devDependencies:
+      '@openstrat/backtesting':
+        specifier: workspace:*
+        version: link:../backtesting
       '@openstrat/domain':
         specifier: workspace:*
         version: link:../domain
+      '@openstrat/market-data':
+        specifier: workspace:*
+        version: link:../market-data
+      '@openstrat/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      '@openstrat/risk':
+        specifier: workspace:*
+        version: link:../risk
+      '@openstrat/strategy-sdk':
+        specifier: workspace:*
+        version: link:../strategy-sdk
       '@openstrat/workers':
         specifier: workspace:*
         version: link:../workers
-      esbuild:
-        specifier: latest
-        version: 0.28.1
 
   packages/domain:
     dependencies:

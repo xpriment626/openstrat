@@ -8,6 +8,9 @@ export * from "./home.js";
 export * from "./runtime.js";
 export * from "./session-store.js";
 export * from "./slash-commands.js";
+export * from "./trading-workbench.js";
+export * from "./workbench-summary.js";
+export * from "./workbench-tui.js";
 
 export async function runProcessCli(): Promise<void> {
   const inputLines =

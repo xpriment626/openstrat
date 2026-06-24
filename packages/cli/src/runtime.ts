@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import type { OpenStratCliHome } from "./home.js";
+import { listDatasets, planDatasetIngestion } from "./trading-workbench.js";
 
 type CodexConfigObject = NonNullable<CodexOptions["config"]>;
 
@@ -83,13 +84,24 @@ class FakeCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
       { type: "thread.started", thread_id: threadId },
       { type: "turn.started" }
     ];
+    let planningText = "";
+
+    if (/\b(data|dataset|ingest|candles|scalp|scalping)\b/i.test(input.prompt)) {
+      const plan = planDatasetIngestion({
+        prompt: input.prompt,
+        home: input.home,
+        sessionId: "fake_codex"
+      });
+      planningText = `\n\nDataset plan: ${plan.symbol} ${plan.intervals.join("/")} ${plan.start_at} to ${plan.end_at}. Suggested command: ${plan.slash_commands[0]}`;
+    }
 
     if (input.prompt.toLowerCase().includes("strategy")) {
+      const strategyContext = fakeStrategyContext(input);
       const strategyPath = join(input.cwd, "src", "strategy.ts");
       mkdirSync(join(strategyPath, ".."), { recursive: true });
       writeFileSync(
         strategyPath,
-        `import { defineStrategy } from "@openstrat/strategy-sdk";\n\nexport const strategy = defineStrategy({\n  strategy_id: "fake_codex_strategy",\n  strategy_version: "0.1.0",\n  name: "Fake Codex Strategy",\n  description: "Deterministic test strategy written by the fake Codex runtime.",\n  runtime: "typescript",\n  entrypoint: "src/strategy.ts",\n  autonomy_mode: "strategy_workbench",\n  allowed_symbols: ["BTC-PERP"],\n  parameters: {},\n  required_data: [],\n  output: "trade_intent",\n  created_at: "2026-06-22T00:00:00.000Z",\n  source_refs: []\n}, () => []);\n`,
+        `import { defineStrategy } from "@openstrat/strategy-sdk";\n\nexport const strategy = defineStrategy({\n  strategy_id: "fake_codex_strategy",\n  strategy_version: "0.1.0",\n  name: "Fake Codex Strategy",\n  description: "Deterministic test strategy written by the fake Codex runtime.",\n  runtime: "typescript",\n  entrypoint: "src/strategy.ts",\n  autonomy_mode: "strategy_workbench",\n  allowed_symbols: ["${strategyContext.canonicalSymbol}"],\n  parameters: {},\n  required_data: [{ kind: "candles", canonical_symbol: "${strategyContext.canonicalSymbol}", interval: "${strategyContext.interval}" }],\n  output: "trade_intent",\n  created_at: "2026-06-22T00:00:00.000Z",\n  source_refs: []\n}, () => []);\n`,
         "utf8"
       );
       events.push({
@@ -103,8 +115,7 @@ class FakeCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
       });
     }
 
-    const finalResponse =
-      "Fake Codex completed the turn. In live mode, Codex SDK owns file/shell tools.";
+    const finalResponse = `Fake Codex completed the turn. In live mode, Codex SDK owns file/shell tools.${planningText}`;
     events.push({
       type: "item.completed",
       item: {
@@ -133,6 +144,24 @@ class FakeCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
       events
     };
   }
+}
+
+function fakeStrategyContext(input: CodexTurnInput): {
+  canonicalSymbol: string;
+  interval: string;
+} {
+  const dataset = listDatasets(input.home)[0];
+  if (dataset) {
+    return {
+      canonicalSymbol: dataset.canonical_symbol,
+      interval: dataset.interval
+    };
+  }
+  const promptSymbol = /\b([A-Z0-9]{2,10})(?:-PERP)?\b/.exec(input.prompt)?.[1];
+  return {
+    canonicalSymbol: `${promptSymbol ?? "BTC"}-PERP`,
+    interval: /\b5\s*m\b/i.test(input.prompt) ? "5m" : "15m"
+  };
 }
 
 function codexEnvironment(
@@ -177,6 +206,8 @@ function openStratPrompt(prompt: string): string {
     "You are running inside OpenStrat, a trading strategy engineering workbench.",
     "Use Codex native file and shell tools for code inspection, edits, tests, and validation.",
     "Use OpenStrat MCP tools for trading-domain context when available.",
+    "For market data requests, infer missing symbol, venue, interval, and date-range assumptions, then propose an OpenStrat ingest command before executing ingestion.",
+    "For strategy work, connect dataset refs, strategy validation, local backtest evidence, and risk preflight artifacts instead of stopping at freeform code generation.",
     "Generated strategy code must stay exchange-agnostic and use OpenStrat strategy contracts.",
     "",
     prompt

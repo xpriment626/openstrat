@@ -3,6 +3,7 @@
 coverage/
 checkpoint/
 checkpoints/
+.openstrat/
 node_modules/
 packages/*/dist/
 packages/*/node_modules/

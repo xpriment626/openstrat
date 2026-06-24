@@ -20,7 +20,16 @@ import type { RiskContext, RiskPolicyEngine } from "@openstrat/risk";
 
 export const AGENT_TOOL_GATEWAY_TOOLS = [
   "market_data.read_snapshot",
+  "dataset.plan_ingestion",
+  "dataset.execute_ingestion",
+  "dataset.validate",
+  "dataset.inspect",
+  "strategy.guide",
+  "strategy.validate",
+  "backtest.plan",
+  "backtest.run",
   "backtest.request",
+  "risk.preflight",
   "risk.validate_intent",
   "strategy_patch.capture",
   "memory_proposal.capture",
