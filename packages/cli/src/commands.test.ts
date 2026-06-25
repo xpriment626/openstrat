@@ -16,6 +16,8 @@ import { OPENSTRAT_CODEX_BASELINE_CONTRACT } from "@openstrat/domain";
 import { AGENT_TOOL_GATEWAY_TOOLS } from "@openstrat/workers";
 import { runOpenStratCli } from "./commands.js";
 import {
+  buildOpenStratCodexConfig,
+  buildOpenStratCodexThreadOptions,
   createCodexWorkbenchRuntime,
   type CodexTurnInput,
   type CodexWorkbenchRuntime
@@ -1709,6 +1711,42 @@ describe("OpenStrat CLI Codex workbench", () => {
 
     expect(runtime.displayModel).toBe("gpt-5.1-codex");
     expect(runtime.availableModels).toEqual(["gpt-5.1-codex", "gpt-5.1-codex-high"]);
+  });
+
+  it("approves the embedded OpenStrat MCP server for non-interactive Codex SDK turns", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const config = buildOpenStratCodexConfig({
+      home,
+      cliEntrypoint: "/tmp/openstrat"
+    });
+    const mcpServers = config.mcp_servers as Record<string, Record<string, unknown>>;
+    const openstrat = mcpServers.openstrat;
+
+    expect(openstrat?.command).toBe(process.execPath);
+    expect(openstrat?.args).toEqual(["/tmp/openstrat", "mcp"]);
+    expect(openstrat?.enabled).toBe(true);
+    expect(openstrat?.required).toBe(false);
+    expect(openstrat?.default_tools_approval_mode).toBe("approve");
+    expect(openstrat?.startup_timeout_sec).toBe(10);
+    expect(openstrat?.tool_timeout_sec).toBe(300);
+  });
+
+  it("runs embedded Codex SDK turns without an interactive approval prompt", () => {
+    const fixture = createFixture();
+    const options = buildOpenStratCodexThreadOptions({
+      cwd: fixture.project,
+      runtimeKind: "codex_sdk",
+      selectedModel: "gpt-5.1-codex",
+      selectedThinking: "high"
+    });
+
+    expect(options.workingDirectory).toBe(fixture.project);
+    expect(options.skipGitRepoCheck).toBe(true);
+    expect(options.sandboxMode).toBe("workspace-write");
+    expect(options.approvalPolicy).toBe("never");
+    expect(options.model).toBe("gpt-5.1-codex");
+    expect(options.modelReasoningEffort).toBe("high");
   });
 
   it("renders live SDK reasoning and tool lifecycle events as Pi-style typed states", async () => {

@@ -4,6 +4,7 @@ import {
   Codex,
   type CodexOptions,
   type ModelReasoningEffort,
+  type ThreadOptions,
   type ThreadEvent
 } from "@openai/codex-sdk";
 import type { OpenStratCliHome } from "./home.js";
@@ -69,20 +70,16 @@ class SdkCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
   async runTurn(input: CodexTurnInput): Promise<CodexTurnResult> {
     const codex = new Codex({
       env: codexEnvironment(input.env, input.home),
-      config: {
-        mcp_servers: openStratMcpConfig(input)
-      }
+      config: buildOpenStratCodexConfig(input)
     });
     const selectedModel = input.model ?? this.displayModel;
     const selectedThinking = input.thinking ?? this.thinking;
-    const threadOptions = {
-      workingDirectory: input.cwd,
-      skipGitRepoCheck: true,
-      sandboxMode: "workspace-write" as const,
-      approvalPolicy: "on-request" as const,
-      ...(selectedModel !== this.kind ? { model: selectedModel } : {}),
-      ...(selectedThinking !== "auto" ? { modelReasoningEffort: selectedThinking } : {})
-    };
+    const threadOptions = buildOpenStratCodexThreadOptions({
+      cwd: input.cwd,
+      runtimeKind: this.kind,
+      selectedModel,
+      selectedThinking
+    });
     const thread = input.codexThreadId
       ? codex.resumeThread(input.codexThreadId, threadOptions)
       : codex.startThread(threadOptions);
@@ -260,7 +257,37 @@ function reasoningEffortEnv(
     : undefined;
 }
 
-function openStratMcpConfig(input: CodexTurnInput): CodexConfigObject {
+export function buildOpenStratCodexConfig(
+  input: Pick<CodexTurnInput, "cliEntrypoint" | "home">
+): CodexConfigObject {
+  return {
+    mcp_servers: openStratMcpConfig(input)
+  };
+}
+
+export function buildOpenStratCodexThreadOptions(input: {
+  cwd: string;
+  runtimeKind: "codex_sdk";
+  selectedModel: string;
+  selectedThinking: OpenStratThinkingEffort;
+}): ThreadOptions {
+  return {
+    workingDirectory: input.cwd,
+    skipGitRepoCheck: true,
+    sandboxMode: "workspace-write",
+    approvalPolicy: "never",
+    ...(input.selectedModel !== input.runtimeKind
+      ? { model: input.selectedModel }
+      : {}),
+    ...(input.selectedThinking !== "auto"
+      ? { modelReasoningEffort: input.selectedThinking }
+      : {})
+  };
+}
+
+function openStratMcpConfig(
+  input: Pick<CodexTurnInput, "cliEntrypoint" | "home">
+): CodexConfigObject {
   const entrypoint = input.cliEntrypoint;
   if (!entrypoint) {
     return {};
@@ -276,7 +303,9 @@ function openStratMcpConfig(input: CodexTurnInput): CodexConfigObject {
       },
       enabled: true,
       required: false,
-      default_tools_approval_mode: "auto"
+      startup_timeout_sec: 10,
+      tool_timeout_sec: 300,
+      default_tools_approval_mode: "approve"
     }
   };
 }
