@@ -206,6 +206,8 @@ export function formatHelp(snapshot: WorkbenchSnapshot): string {
     "  /help - grouped commands, examples, and guided path",
     "  /status - project homes, auth, evidence counts, and next action",
     "  /guide - guided local strategy workflow",
+    "  /model - choose the Codex model for the next live turn",
+    "  /effort - choose the Codex thinking effort for the next live turn",
     "  /ready - local readiness summary before wallet/deploy work",
     "",
     "Market data:",

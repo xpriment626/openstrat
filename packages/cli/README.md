@@ -114,6 +114,8 @@ The TUI uses an in-repo renderer that borrows the Codex/Pi agent-console shape w
 - `/status`
 - `/help`
 - `/guide`
+- `/model`
+- `/effort`
 - `/markets`
 - `/datasets`
 - `/strategy`
@@ -215,6 +217,8 @@ Useful slash command equivalents:
 ```text
 /help
 /guide
+/model
+/effort
 /datasets plan SOL token 5m and 15m scalping data
 /datasets ingest --symbol SOL --interval 5m --start 2026-06-01T00:00:00.000Z --end 2026-06-01T01:00:00.000Z --fixture
 /datasets validate

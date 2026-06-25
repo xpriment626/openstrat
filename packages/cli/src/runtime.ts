@@ -1,10 +1,17 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
+import {
+  Codex,
+  type CodexOptions,
+  type ModelReasoningEffort,
+  type ThreadEvent
+} from "@openai/codex-sdk";
 import type { OpenStratCliHome } from "./home.js";
 import { listDatasets, planDatasetIngestion } from "./trading-workbench.js";
 
 type CodexConfigObject = NonNullable<CodexOptions["config"]>;
+
+export type OpenStratThinkingEffort = "auto" | ModelReasoningEffort;
 
 export interface CodexTurnInput {
   prompt: string;
@@ -13,6 +20,8 @@ export interface CodexTurnInput {
   codexThreadId?: string | undefined;
   home: OpenStratCliHome;
   cliEntrypoint?: string | undefined;
+  model?: string | undefined;
+  thinking?: OpenStratThinkingEffort | undefined;
   onEvent?: (event: ThreadEvent) => void;
 }
 
@@ -24,6 +33,10 @@ export interface CodexTurnResult {
 
 export interface CodexWorkbenchRuntime {
   kind: "codex_sdk" | "fake_codex";
+  displayModel?: string;
+  availableModels?: readonly string[];
+  thinking?: OpenStratThinkingEffort;
+  contextWindow?: number;
   runTurn(input: CodexTurnInput): Promise<CodexTurnResult>;
 }
 
@@ -33,11 +46,25 @@ export function createCodexWorkbenchRuntime(
   if (env.OPENSTRAT_CODEX_RUNTIME === "fake") {
     return new FakeCodexWorkbenchRuntime();
   }
-  return new SdkCodexWorkbenchRuntime();
+  return new SdkCodexWorkbenchRuntime(env);
 }
 
 class SdkCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
   readonly kind = "codex_sdk" as const;
+  readonly displayModel: string;
+  readonly availableModels: readonly string[];
+  readonly thinking: OpenStratThinkingEffort;
+  readonly contextWindow?: number;
+
+  constructor(env: Record<string, string | undefined>) {
+    this.displayModel = stringEnv(env, "OPENSTRAT_CODEX_MODEL") ?? this.kind;
+    this.availableModels = modelListEnv(env, this.displayModel);
+    this.thinking = reasoningEffortEnv(env) ?? "auto";
+    const contextWindow = numberEnv(env, "OPENSTRAT_CODEX_CONTEXT_WINDOW");
+    if (contextWindow !== undefined) {
+      this.contextWindow = contextWindow;
+    }
+  }
 
   async runTurn(input: CodexTurnInput): Promise<CodexTurnResult> {
     const codex = new Codex({
@@ -46,11 +73,15 @@ class SdkCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
         mcp_servers: openStratMcpConfig(input)
       }
     });
+    const selectedModel = input.model ?? this.displayModel;
+    const selectedThinking = input.thinking ?? this.thinking;
     const threadOptions = {
       workingDirectory: input.cwd,
       skipGitRepoCheck: true,
       sandboxMode: "workspace-write" as const,
-      approvalPolicy: "on-request" as const
+      approvalPolicy: "on-request" as const,
+      ...(selectedModel !== this.kind ? { model: selectedModel } : {}),
+      ...(selectedThinking !== "auto" ? { modelReasoningEffort: selectedThinking } : {})
     };
     const thread = input.codexThreadId
       ? codex.resumeThread(input.codexThreadId, threadOptions)
@@ -77,6 +108,9 @@ class SdkCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
 
 class FakeCodexWorkbenchRuntime implements CodexWorkbenchRuntime {
   readonly kind = "fake_codex" as const;
+  readonly displayModel = "fake_codex";
+  readonly availableModels = ["fake_codex", "fake_codex-high"] as const;
+  readonly thinking = "auto" as const;
 
   async runTurn(input: CodexTurnInput): Promise<CodexTurnResult> {
     const threadId = input.codexThreadId ?? `fake_thread_${Date.now()}`;
@@ -178,6 +212,52 @@ function codexEnvironment(
   result.OPENSTRAT_HOME = home.projectRoot;
   result.OPENSTRAT_USER_HOME = home.userRoot;
   return result;
+}
+
+function stringEnv(
+  env: Record<string, string | undefined>,
+  key: string
+): string | undefined {
+  const value = env[key]?.trim();
+  return value ? value : undefined;
+}
+
+function modelListEnv(
+  env: Record<string, string | undefined>,
+  selectedModel: string
+): readonly string[] {
+  const configured = env.OPENSTRAT_CODEX_MODELS?.split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  const models = configured && configured.length > 0 ? configured : [selectedModel];
+  return uniquePreservingOrder(
+    models.includes(selectedModel) ? models : [selectedModel, ...models]
+  );
+}
+
+function uniquePreservingOrder(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function numberEnv(
+  env: Record<string, string | undefined>,
+  key: string
+): number | undefined {
+  const value = Number(env[key]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function reasoningEffortEnv(
+  env: Record<string, string | undefined>
+): ModelReasoningEffort | undefined {
+  const value = stringEnv(env, "OPENSTRAT_CODEX_THINKING");
+  return value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+    ? value
+    : undefined;
 }
 
 function openStratMcpConfig(input: CodexTurnInput): CodexConfigObject {

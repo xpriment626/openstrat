@@ -9,11 +9,17 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
+import type { ModelReasoningEffort, ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { OPENSTRAT_CODEX_BASELINE_CONTRACT } from "@openstrat/domain";
 import { AGENT_TOOL_GATEWAY_TOOLS } from "@openstrat/workers";
 import { runOpenStratCli } from "./commands.js";
+import {
+  createCodexWorkbenchRuntime,
+  type CodexTurnInput,
+  type CodexWorkbenchRuntime
+} from "./runtime.js";
 import { invokeOpenStratMcpTool } from "./mcp.js";
 import {
   artifactIndexPath,
@@ -29,7 +35,10 @@ import {
   recordTuiDiagnostic,
   recordTuiEntry,
   renderSlashCommandView,
-  renderWorkbenchTui
+  renderWorkbenchTuiAppend,
+  renderWorkbenchTui,
+  setTuiThinkingVisible,
+  setTuiToolsExpanded
 } from "./workbench-tui.js";
 
 const roots: string[] = [];
@@ -93,15 +102,47 @@ describe("OpenStrat CLI Codex workbench", () => {
     expect(screen).toContain("user ");
     expect(screen).toContain("artifact missing");
     expect(screen).toContain("commands: /markets /datasets /sessions");
-    expect(screen).toContain("You");
     expect(screen).toContain("I need SOL scalping data");
     expect(screen).toContain("Diagnostic warning");
     expect(screen).toContain("MCP startup warning");
-    expect(screen).toContain("Composer");
+    expect(screen).not.toContain("Composer");
     expect(screen).toContain("openstrat>");
+    expect(screen).not.toContain("Natural language runs through Codex");
     expect(liveScreen).not.toContain("Composer");
     expect(liveScreen).not.toContain("openstrat>");
     expect(narrowScreen.split("\n").every((line) => line.length <= 50)).toBe(true);
+  });
+
+  it("renders the static composer as a Pi-style magenta input box", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 72,
+      composerPrompt: "openstrat> ",
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("openstrat>");
+    expect(plain).not.toContain("No messages yet");
+    expect(plain).not.toContain("Ask naturally");
+    expect(plain).not.toContain("Composer");
+    expect(rendered).toContain("\x1b[38;2;236;174;236m+");
+    expect(rendered).toContain("\x1b[38;2;236;174;236m|\x1b[0m openstrat> ");
+    expect(rendered).not.toContain("+~ Composer");
   });
 
   it("renders a selected Hyperliquid market as a dataset-planning action", async () => {
@@ -217,7 +258,7 @@ describe("OpenStrat CLI Codex workbench", () => {
     expect(output.join("\n")).toContain("OpenStrat local workbench commands");
     expect(output.join("\n")).toContain("Guided local strategy workbench path");
     expect(output.join("\n")).toContain("Started new OpenStrat session");
-    expect(output.join("\n")).toContain("codex: file_change completed");
+    expect(output.join("\n")).toContain("write src/strategy.ts");
     expect(output.join("\n")).toContain("Found 1 strategy source candidate");
     expect(output.join("\n")).toContain("local strategy ready: no");
     expect(readFileSync(join(fixture.project, "src", "strategy.ts"), "utf8")).toContain(
@@ -295,16 +336,16 @@ describe("OpenStrat CLI Codex workbench", () => {
 
     const rendered = output.join("\n");
     expect(result.exitCode).toBe(0);
-    expect(rendered).toContain("Workbench View");
+    expect(rendered).toContain("OpenStrat /markets ok");
     expect(rendered).toContain("Market Catalog");
     expect(rendered).toContain("selected: SOL-PERP");
     expect(rendered).toContain("/datasets plan --symbol SOL");
     expect(rendered).toContain("Diagnostic error");
     expect(rendered).toContain("Unknown OpenStrat command: /definitely-not-real");
-    expect(rendered).toContain("codex: file_change completed");
+    expect(rendered).toContain("write src/strategy.ts");
     expect(rendered).toContain("Sessions");
     expect(rendered).toContain("Wrote OpenStrat session summary");
-    expect(rendered).toContain("Composer");
+    expect(rendered).not.toContain("Composer");
   });
 
   it("honors COLUMNS for scripted non-TTY TUI output", async () => {
@@ -329,7 +370,7 @@ describe("OpenStrat CLI Codex workbench", () => {
     expect(output.filter((line) => line.length > 54)).toEqual([]);
   });
 
-  it("uses the alternate screen for live TTY workbench rendering", async () => {
+  it("uses normal-screen TTY rendering so transcript output remains scrollable", async () => {
     const fixture = createFixture();
     const stdout: string[] = [];
     const terminal = new CapturingTtyWritable(96, 20);
@@ -349,13 +390,427 @@ describe("OpenStrat CLI Codex workbench", () => {
 
     const rawScreen = terminal.output;
     expect(result.exitCode).toBe(0);
-    expect(rawScreen).toContain("\x1b[?1049h");
-    expect(rawScreen).toContain("\x1b[H\x1b[2JOpenStrat Workbench");
-    expect(rawScreen).toContain("\x1b[?1049l");
+    expect(rawScreen).not.toContain("\x1b[?1049h");
+    expect(rawScreen).not.toContain("\x1b[?1049l");
+    expect(rawScreen).not.toContain("\x1b[H\x1b[2J");
+    expect(rawScreen).toContain("\x1b[38;2;236;174;236m+");
+    expect(rawScreen).toContain("openstrat>");
+    expect(rawScreen).toContain("OpenStrat Workbench");
     expect(rawScreen).not.toContain("+- Composer");
-    expect(renderedTtyFrameHeights(rawScreen).every((height) => height <= 19)).toBe(
-      true
+    expect(rawScreen).not.toContain("earlier line(s); latest output shown");
+    expect(stdout).toContain("bye");
+  });
+
+  it("uses an owned live composer that applies backspace before submitting", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["bad\x7fk", "/exit"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("bak");
+    expect(plain).not.toContain("bad\x7fk");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets the owned live composer exit on ctrl-d when empty", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["\x04"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("openstrat>");
+    expect(plain).not.toContain("working running Codex turn");
+    expect(stdout).toContain("bye");
+  });
+
+  it("pauses owned composer stdin on exit without requiring EOF", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = new PausingPassThrough();
+    let sent = false;
+    terminal.onPrompt = () => {
+      if (sent) {
+        return;
+      }
+      sent = true;
+      queueMicrotask(() => {
+        stdin.write("/exit\n");
+      });
+    };
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(stdin.pauseCount).toBeGreaterThan(0);
+    expect(stdout).toContain("bye");
+    stdin.destroy();
+  });
+
+  it("lets the owned live composer insert text at the cursor", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["ac\x1b[Db", "/exit"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("abc");
+    expect(plain).not.toContain("[Db");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets the owned live composer recall the previous submitted prompt", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["remember this", "\x1b[A", "/exit"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).not.toContain("[A");
+    expect((plain.match(/remember this/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets the owned live composer submit a multiline prompt", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("first line\\\nsecond line\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          reasoning_output_tokens: 7
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns).toHaveLength(1);
+    expect(runtime.turns[0]?.prompt).toBe("first line\nsecond line");
+    expect(plain).toContain("first line");
+    expect(plain).toContain("second line");
+    expect(plain).toContain("|            second line");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets tab complete a unique slash-command prefix in the live composer", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["/mar\tSOL", "/exit"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("/markets SOL");
+    expect(plain).toContain("OpenStrat /markets ok");
+    expect(plain).toContain("selected: SOL-PERP");
+    expect(plain).not.toContain("/marSOL");
+    expect(plain).not.toContain("\t");
+    expect(stdout).toContain("bye");
+  });
+
+  it("shows slash-command suggestions for ambiguous tab completion", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = new PassThrough();
+    let sent = false;
+    terminal.onPrompt = () => {
+      if (sent) {
+        return;
+      }
+      sent = true;
+      queueMicrotask(() => {
+        stdin.write("/s\t\x03");
+      });
+    };
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("matches: /status /strategy /sessions");
+    expect(plain).not.toContain("OpenStrat /s");
+    expect(plain).not.toContain("\t");
+    expect(stdout).toContain("bye");
+    stdin.destroy();
+  });
+
+  it("lets arrow keys select and tab accept slash-command suggestions", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, ["/s\t\x1b[B\t", "/exit"]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("› /strategy");
+    expect(terminal.output).toContain("\x1b[38;2;236;174;236m› /strategy");
+    expect(plain).toContain("| openstrat> /strategy ");
+    expect(plain).toContain("OpenStrat /strategy ok");
+    expect(plain).not.toContain("OpenStrat /s error");
+    expect(plain).not.toContain("Unknown OpenStrat command: /s");
+    expect(plain).not.toContain("\t");
+    expect(stdout).toContain("bye");
+  });
+
+  it("keeps live TTY chat in flow after opening a workbench command view", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const stdin = attachScriptedInput(terminal, [
+      "/markets SOL",
+      "write a SOL strategy after opening the market panel",
+      "/exit"
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const rawScreen = terminal.output;
+    expect(result.exitCode).toBe(0);
+    expect(rawScreen).not.toContain("\x1b[?1049h");
+    expect(rawScreen).not.toContain("+- Chat ");
+    expect(rawScreen).not.toContain("+- Workbench View ");
+    expect(rawScreen).not.toContain("earlier chat line(s)");
+    expect(rawScreen).toContain("OpenStrat /markets ok");
+    expect(rawScreen).toContain("Market Catalog");
+    expect(rawScreen).toContain("write a SOL strategy after opening the market panel");
+    expect(rawScreen).toContain("Fake Codex completed the turn.");
+    expect(rawScreen.indexOf("OpenStrat /markets ok")).toBeLessThan(
+      rawScreen.indexOf("Market Catalog")
     );
+    expect(rawScreen.indexOf("Market Catalog")).toBeLessThan(
+      rawScreen.indexOf("write a SOL strategy")
+    );
+    expect((rawScreen.match(/OpenStrat Workbench/g) ?? []).length).toBe(1);
+    expect(stdout).toContain("bye");
+  });
+
+  it("projects live Codex progress as typed TUI states without misleading codex prefixes", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(100, 24);
+    const stdin = attachScriptedInput(terminal, [
+      "write a SOL strategy with the selected market",
+      "/exit"
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const rawScreen = terminal.output;
+    const plain = stripAnsi(rawScreen);
+    expect(result.exitCode).toBe(0);
+    expect(rawScreen).toContain("\x1b[38;2;236;174;236mWorking...");
+    expect(rawScreen).toContain("\x1b[38;2;150;150;150mrunning Codex turn");
+    expect(rawScreen).toContain("\x1b[48;2;40;50;40m");
+    expect(plain).toContain("Working... running Codex turn");
+    expect(plain).toContain("write src/strategy.ts");
+    expect(plain).toContain("Fake Codex completed the turn.");
+    expect(plain).toContain("↑1");
+    expect(plain).toContain("↓1");
+    expect(plain).toContain("fake_codex • auto");
+    expect(plain).not.toContain("codex: working");
+    expect(plain).not.toContain("codex: codex");
+    expect(plain).not.toContain("Codex: Fake Codex completed the turn.");
+    expect(stdout).toContain("bye");
+  });
+
+  it("continues appending live TTY turns after the retained transcript cap", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(96, 20);
+    const finalPrompt = "turn 22 after retained entry cap";
+    const stdin = attachScriptedInput(terminal, [
+      ...Array.from({ length: 21 }, (_, index) => `turn ${index + 1}`),
+      finalPrompt,
+      "/exit"
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: {
+        ...fixture.env,
+        OPENSTRAT_CODEX_RUNTIME: "fake"
+      },
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const rawScreen = terminal.output;
+    expect(result.exitCode).toBe(0);
+    expect(rawScreen).toContain(finalPrompt);
+    expect(rawScreen).toContain("Fake Codex completed the turn.");
+    expect(rawScreen).not.toContain("\x1b[?1049h");
+    expect((rawScreen.match(/OpenStrat Workbench/g) ?? []).length).toBe(1);
     expect(stdout).toContain("bye");
   });
 
@@ -385,6 +840,7 @@ describe("OpenStrat CLI Codex workbench", () => {
       ],
       activeView: [
         "Market Catalog",
+        "Hyperliquid perps",
         ...Array.from({ length: 40 }, (_, index) => {
           return `${index + 1}. MARKET-${index + 1}-PERP active liquidity=1.00`;
         })
@@ -400,6 +856,1772 @@ describe("OpenStrat CLI Codex workbench", () => {
     expect(rendered.split("\n").length).toBeLessThanOrEqual(20);
     expect(rendered).toContain("OpenStrat Workbench");
     expect(rendered).toContain("session ");
+  });
+
+  it("keeps chat turns readable when command output is active", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"],
+      entries: [
+        {
+          kind: "user",
+          title: "You",
+          body: "first user turn should stay visible"
+        },
+        {
+          kind: "assistant",
+          title: "Codex",
+          body: "first assistant response should stay visible"
+        },
+        {
+          kind: "command",
+          title: "/markets ok",
+          body: "Hyperliquid perps\nnext: choose SOL"
+        },
+        {
+          kind: "user",
+          title: "You",
+          body: "latest user turn should also stay visible"
+        }
+      ],
+      activeView: [
+        "Market Catalog",
+        "Hyperliquid perps",
+        ...Array.from({ length: 40 }, (_, index) => {
+          return `${index + 1}. MARKET-${index + 1}-PERP active liquidity=1.00`;
+        })
+      ].join("\n")
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      height: 30
+    });
+
+    expect(rendered.split("\n").length).toBeLessThanOrEqual(30);
+    expect(rendered).not.toContain("+- Chat ");
+    expect(rendered).not.toContain("+- Workbench View ");
+    expect(rendered.indexOf("first user turn should stay visible")).toBeLessThan(
+      rendered.indexOf("OpenStrat /markets ok")
+    );
+    expect(rendered.indexOf("OpenStrat /markets ok")).toBeLessThan(
+      rendered.indexOf("Market Catalog")
+    );
+    expect(rendered).toContain("first user turn should stay visible");
+    expect(rendered).toContain("first assistant response should stay visible");
+    expect(rendered).toContain("Hyperliquid perps");
+    expect(rendered).toContain("latest user turn should also stay visible");
+    expect(rendered).toContain("... ");
+  });
+
+  it("renders workbench output inline in the chat flow instead of boxing previous chat", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"],
+      entries: [
+        {
+          kind: "user",
+          title: "You",
+          body: "first user turn should stay in the main flow"
+        },
+        {
+          kind: "assistant",
+          title: "Codex",
+          body: "first assistant response should stay in the main flow"
+        },
+        {
+          kind: "command",
+          title: "/markets ok",
+          body: "Hyperliquid perps\nnext: choose SOL"
+        }
+      ],
+      activeView: [
+        "Market Catalog",
+        "Hyperliquid perps",
+        ...Array.from({ length: 18 }, (_, index) => {
+          return `${index + 1}. MARKET-${index + 1}-PERP active liquidity=1.00`;
+        })
+      ].join("\n")
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      height: 30
+    });
+
+    expect(rendered).not.toContain("+- Chat ");
+    expect(rendered).not.toContain("earlier chat line(s)");
+    expect(
+      rendered.indexOf("first user turn should stay in the main flow")
+    ).toBeLessThan(
+      rendered.indexOf("first assistant response should stay in the main flow")
+    );
+    expect(
+      rendered.indexOf("first assistant response should stay in the main flow")
+    ).toBeLessThan(rendered.indexOf("OpenStrat /markets ok"));
+    expect(rendered.indexOf("OpenStrat /markets ok")).toBeLessThan(
+      rendered.indexOf("Market Catalog")
+    );
+    expect(rendered).toContain("first user turn should stay in the main flow");
+    expect(rendered).toContain("first assistant response should stay in the main flow");
+  });
+
+  it("renders active workbench views as titled typed blocks", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"],
+      entries: [
+        {
+          kind: "command",
+          title: "/markets ok",
+          body: "Hyperliquid perps\nnext: choose SOL"
+        }
+      ],
+      activeView: [
+        "Market Catalog",
+        "Hyperliquid perps",
+        ...Array.from({ length: 18 }, (_, index) => {
+          return `${index + 1}. MARKET-${index + 1}-PERP active liquidity=1.00`;
+        })
+      ].join("\n")
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("OpenStrat /markets ok");
+    expect(plain).toContain("Market Catalog");
+    expect(plain).toContain("Hyperliquid perps");
+    expect(plain).toContain("ctrl+o to expand");
+    expect(rendered).toContain(
+      "\x1b[48;2;40;50;40m\x1b[1m\x1b[38;2;212;212;212mMarket Catalog"
+    );
+    expect(rendered).not.toContain(
+      "\x1b[48;2;40;50;40m\x1b[38;2;128;128;128m  Hyperliquid perps"
+    );
+    expect(rendered).toContain(
+      "\x1b[48;2;40;50;40m\x1b[38;2;176;184;184m  Hyperliquid perps"
+    );
+    expect(rendered).not.toContain(
+      "\x1b[48;2;40;50;40m\x1b[38;2;212;212;212m  Market Catalog"
+    );
+  });
+
+  it("renders slash command results as typed workbench blocks", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"],
+      entries: [
+        {
+          kind: "command",
+          title: "/markets ok",
+          body: "Hyperliquid perps\nnext: choose SOL"
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("OpenStrat /markets ok");
+    expect(plain).toContain("Hyperliquid perps");
+    expect(rendered).toContain(
+      "\x1b[48;2;40;50;40m\x1b[1m\x1b[38;2;212;212;212mOpenStrat /markets ok"
+    );
+    expect(rendered).toContain(
+      "\x1b[48;2;40;50;40m\x1b[38;2;176;184;184m  Hyperliquid perps"
+    );
+    expect(rendered).not.toContain("\nOpenStrat /markets ok\n");
+  });
+
+  it("renders unavailable and error slash command statuses with non-success tones", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/ready"],
+      entries: [
+        {
+          kind: "command",
+          title: "/ready unavailable",
+          body: "local strategy ready: no"
+        },
+        {
+          kind: "command",
+          title: "/definitely-not-real error",
+          body: "Unknown OpenStrat command: /definitely-not-real"
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("OpenStrat /ready unavailable");
+    expect(plain).toContain("OpenStrat /definitely-not-real error");
+    expect(rendered).toContain(
+      "\x1b[48;2;40;40;50m\x1b[1m\x1b[38;2;212;212;212mOpenStrat /ready unavailable"
+    );
+    expect(rendered).toContain(
+      "\x1b[48;2;60;40;40m\x1b[1m\x1b[38;2;212;212;212mOpenStrat /definitely-not-real error"
+    );
+  });
+
+  it("renders Pi-style typed transcript states with distinct visual treatments", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"],
+      entries: [
+        {
+          kind: "user",
+          title: "You",
+          body: "testing text output and rendering behaviour"
+        },
+        {
+          kind: "thinking",
+          title: "Thinking",
+          body: "The user is testing text output; respond briefly."
+        },
+        {
+          kind: "working",
+          title: "Working",
+          body: "running strategy workspace checks"
+        },
+        {
+          kind: "tool_call",
+          title: "read ~/Lab/openstrat/packages/cli/src/workbench-tui.ts",
+          body: "packages/cli/src/workbench-tui.ts"
+        },
+        {
+          kind: "tool_result",
+          title: "$ pnpm test",
+          body: Array.from({ length: 18 }, (_, index) => {
+            return `line ${index + 1}: test output`;
+          }).join("\n")
+        },
+        {
+          kind: "assistant",
+          title: "Codex",
+          body: "Text output and rendering work on this end."
+        },
+        {
+          kind: "tool_error",
+          title: "$ pnpm lint",
+          body: "lint failed"
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 100,
+      showComposer: true,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(rendered).toContain("\x1b[48;2;52;53;65m");
+    expect(rendered.split("\x1b[48;2;52;53;65m").length - 1).toBeGreaterThanOrEqual(3);
+    expect(rendered).toContain("\x1b[38;2;236;174;236m");
+    expect(rendered).toContain("\x1b[3m");
+    expect(rendered).toContain("\x1b[38;2;0;215;255m");
+    expect(rendered).toContain("\x1b[38;2;181;189;104m");
+    expect(rendered.split("\x1b[48;2;40;40;50m").length - 1).toBeGreaterThanOrEqual(3);
+    expect(rendered).toContain("\x1b[48;2;60;40;40m");
+    expect(rendered).toContain("\x1b[1m\x1b[38;2;181;189;104m  $ pnpm test");
+    expect(rendered).toContain("\x1b[38;2;176;184;184m  stdout");
+    expect(rendered).toContain(
+      "\x1b[48;2;60;40;40m\x1b[1m\x1b[38;2;212;212;212m  $ pnpm lint"
+    );
+    expect(rendered).toContain(
+      "\x1b[48;2;60;40;40m\x1b[38;2;176;184;184m    lint failed"
+    );
+    expect(plain).toContain("testing text output and rendering behaviour");
+    expect(plain).toContain("The user is testing text output; respond briefly.");
+    expect(plain).toContain("Working... running strategy workspace checks");
+    expect(plain).not.toContain("working running strategy workspace checks");
+    expect(plain).toContain("read ~/Lab/openstrat/packages/cli/src/workbench-tui.ts");
+    expect(plain).not.toContain("\n  packages/cli/src/workbench-tui.ts");
+    expect(plain).toContain("$ pnpm test");
+    expect(plain).toContain("... (");
+    expect(plain).toContain("ctrl+o to expand");
+    expect(plain).toContain("Text output and rendering work on this end.");
+    expect(plain).toContain("$ pnpm lint");
+    expect(plain).toContain("lint failed");
+    expect(plain).toContain("openstrat>");
+    expect(plain).not.toContain("codex: codex");
+  });
+
+  it("renders assistant final text with terminal markdown structure", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "assistant",
+          title: "Codex",
+          body: [
+            "# Strategy note",
+            "",
+            "- keep risk bounded",
+            "- validate fills",
+            "",
+            "Use `max_slippage_bps` before deploy.",
+            "",
+            "```ts",
+            "const risk = 0.01;",
+            "```"
+          ].join("\n")
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("\n Strategy note\n");
+    expect(plain).not.toContain("\nStrategy note\n");
+    expect(plain).not.toContain("# Strategy note");
+    expect(plain).toContain("   - keep risk bounded");
+    expect(plain).toContain("   - validate fills");
+    expect(plain).toContain(
+      "   - validate fills\n\n Use max_slippage_bps before deploy."
+    );
+    expect(plain).toContain(" Use max_slippage_bps before deploy.");
+    expect(plain).toContain(" Use max_slippage_bps before deploy.\n\n     const risk");
+    expect(plain).toContain("     const risk = 0.01;");
+    expect(plain).not.toContain("```");
+    expect(rendered).toContain("\x1b[38;2;0;215;255m");
+  });
+
+  it("toggles clipped tool output between Pi-style collapsed and expanded states", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const longOutput = Array.from({ length: 16 }, (_, index) => {
+      return `line ${index + 1}: tool output`;
+    }).join("\n");
+    const collapsedState = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "tool_result",
+          title: "$ pnpm test",
+          body: longOutput
+        }
+      ]
+    });
+
+    const collapsed = stripAnsi(
+      renderWorkbenchTui(collapsedState, {
+        width: 92,
+        showComposer: false,
+        color: true
+      })
+    );
+    const expanded = stripAnsi(
+      renderWorkbenchTui(setTuiToolsExpanded(collapsedState, true), {
+        width: 92,
+        showComposer: false,
+        color: true
+      })
+    );
+
+    expect(collapsed).toContain("line 10: tool output");
+    expect(collapsed).toContain("ctrl+o to expand");
+    expect(collapsed).not.toContain("line 16: tool output");
+    expect(expanded).toContain("line 16: tool output");
+    expect(expanded).toContain("ctrl+o to collapse");
+    expect(expanded).not.toContain("ctrl+o to expand");
+  });
+
+  it("renders tool output as readable stdout stderr and body sections", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "tool_result",
+          title: "$ pnpm test",
+          body: [
+            "RUN packages/cli/src/commands.test.ts",
+            "28 passed",
+            "stderr: deprecated flag",
+            "body: structured result accepted",
+            "status: completed",
+            "exit: 0"
+          ].join("\n")
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("$ pnpm test");
+    expect(plain).toContain("stdout");
+    expect(plain).toContain("  RUN packages/cli/src/commands.test.ts");
+    expect(plain).toContain("  28 passed");
+    expect(plain).toContain("stderr");
+    expect(plain).toContain("  deprecated flag");
+    expect(plain).toContain("body");
+    expect(plain).toContain("  structured result accepted");
+    expect(plain).toContain("status completed");
+    expect(plain).toContain("exit 0");
+    expect(plain).not.toContain("stderr: deprecated flag");
+    expect(plain).not.toContain("body: structured result accepted");
+  });
+
+  it("renders shell command results with a Pi-style bash frame", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "tool_result",
+          title: "$ pnpm test",
+          body: "RUN packages/cli/src/commands.test.ts\n28 passed\nstatus: completed\nexit: 0"
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 72,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+    const shellRuleCount = plain
+      .split("\n")
+      .filter((line) => /^─+$/.test(line.trim())).length;
+
+    expect(shellRuleCount).toBeGreaterThanOrEqual(2);
+    expect(rendered).toContain("\x1b[38;2;181;189;104m");
+    expect(rendered).toContain("\x1b[1m\x1b[38;2;181;189;104m  $ pnpm test");
+    expect(rendered).toContain("\x1b[38;2;176;184;184m  stdout");
+    expect(plain).toContain("$ pnpm test");
+    expect(plain).toContain("RUN packages/cli/src/commands.test.ts");
+    expect(plain).toContain("status completed");
+    expect(plain).toContain("exit 0");
+  });
+
+  it("renders pending shell commands with a Pi-style running row", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "tool_call",
+          title: "$ pnpm test",
+          body: "status: in_progress"
+        }
+      ]
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 72,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("$ pnpm test");
+    expect(plain).toContain("Running...");
+    expect(plain).not.toContain("status in_progress");
+    expect(rendered).toContain("\x1b[1m\x1b[38;2;181;189;104m  $ pnpm test");
+    expect(rendered).toContain("\x1b[38;2;176;184;184m  Running...");
+  });
+
+  it("toggles thinking traces between visible content and a Pi-style hidden label", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets"],
+      entries: [
+        {
+          kind: "thinking",
+          title: "Thinking",
+          body: "I should inspect the local strategy files before responding."
+        }
+      ]
+    });
+
+    const visible = stripAnsi(
+      renderWorkbenchTui(state, {
+        width: 92,
+        showComposer: false,
+        color: true
+      })
+    );
+    const hiddenRendered = renderWorkbenchTui(setTuiThinkingVisible(state, false), {
+      width: 92,
+      showComposer: false,
+      color: true
+    });
+    const hidden = stripAnsi(hiddenRendered);
+
+    expect(visible).toContain(
+      "I should inspect the local strategy files before responding."
+    );
+    expect(hidden).toContain("Thinking...");
+    expect(hidden).not.toContain(
+      "I should inspect the local strategy files before responding."
+    );
+    expect(hiddenRendered).toContain("\x1b[3m");
+  });
+
+  it("coalesces tool lifecycle entries with the same display id", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const pendingEntry = {
+      id: "cmd_1",
+      kind: "tool_call",
+      title: "$ pnpm test",
+      body: "status: in_progress"
+    } as unknown as Parameters<typeof recordTuiEntry>[1];
+    const completedEntry = {
+      id: "cmd_1",
+      kind: "tool_result",
+      title: "$ pnpm test",
+      body: "RUN packages/cli/src/commands.test.ts\n28 passed\nstatus: completed\nexit: 0"
+    } as unknown as Parameters<typeof recordTuiEntry>[1];
+    let state = createWorkbenchTuiState({
+      runtimeKind: "fake_codex",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"]
+    });
+
+    state = recordTuiEntry(state, pendingEntry);
+    state = recordTuiEntry(state, completedEntry);
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 100,
+      showComposer: false,
+      color: true
+    });
+    const plain = stripAnsi(rendered);
+
+    expect((plain.match(/\$ pnpm test/g) ?? []).length).toBe(1);
+    expect(plain).not.toContain("status: in_progress");
+    expect(plain).toContain("28 passed");
+    expect(rendered).toContain("\x1b[38;2;181;189;104m");
+  });
+
+  it("restates tool action titles in appended update rows", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "codex_sdk",
+      snapshot,
+      commands: ["/help", "/markets", "/datasets", "/sessions"]
+    });
+
+    const rendered = renderWorkbenchTuiAppend(state, {
+      width: 100,
+      color: true,
+      updatedEntry: {
+        id: "mcp_read_1",
+        kind: "tool_result",
+        title: "read SOL-PERP",
+        body: 'body: {"status":"completed","message":"market loaded"}\nstatus: completed'
+      }
+    });
+    const plain = stripAnsi(rendered);
+
+    expect(plain).toContain("read SOL-PERP");
+    expect(plain).toContain("market loaded");
+    expect(plain).toContain("status completed");
+    expect(plain).not.toContain("\ncompleted");
+  });
+
+  it("renders Codex-style footer usage, context, model, and thinking state when available", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const state = createWorkbenchTuiState({
+      runtimeKind: "codex_sdk",
+      snapshot,
+      commands: ["/help", "/markets"],
+      footer: {
+        model: "gpt-5.1-codex",
+        thinking: "high",
+        inputTokens: 93000,
+        outputTokens: 3400,
+        reasoningTokens: 16000,
+        cacheHitPercent: 6.6,
+        contextPercent: 3,
+        contextWindow: 1000000,
+        costUsd: 0.01,
+        autoCompact: true
+      }
+    });
+
+    const rendered = renderWorkbenchTui(state, {
+      width: 110,
+      showComposer: false
+    });
+
+    expect(rendered).toContain("↑93k");
+    expect(rendered).toContain("↓3.4k");
+    expect(rendered).toContain("R16k");
+    expect(rendered).toContain("CH6.6%");
+    expect(rendered).toContain("$0.010");
+    expect(rendered).toContain("3.0%/1.0M (auto)");
+    expect(rendered).toContain("gpt-5.1-codex • high");
+    expect(rendered).toContain("codex_sdk");
+    expect(rendered).toContain("auth missing");
+  });
+
+  it("colors high footer context usage like Pi status thresholds", () => {
+    const fixture = createFixture();
+    const home = resolveOpenStratCliHome({ cwd: fixture.project, env: fixture.env });
+    const session = createWorkbenchSession(home, fixture.project);
+    const snapshot = buildWorkbenchSnapshot({
+      home,
+      cwd: fixture.project,
+      env: fixture.env,
+      session
+    });
+    const warningState = createWorkbenchTuiState({
+      runtimeKind: "codex_sdk",
+      snapshot,
+      commands: ["/help", "/markets"],
+      footer: {
+        model: "gpt-5.1-codex",
+        thinking: "high",
+        contextPercent: 75,
+        contextWindow: 1000000,
+        autoCompact: true
+      }
+    });
+    const errorState = createWorkbenchTuiState({
+      runtimeKind: "codex_sdk",
+      snapshot,
+      commands: ["/help", "/markets"],
+      footer: {
+        model: "gpt-5.1-codex",
+        thinking: "high",
+        contextPercent: 92,
+        contextWindow: 1000000,
+        autoCompact: true
+      }
+    });
+
+    const warningRendered = renderWorkbenchTui(warningState, {
+      width: 110,
+      showComposer: false,
+      color: true
+    });
+    const errorRendered = renderWorkbenchTui(errorState, {
+      width: 110,
+      showComposer: false,
+      color: true
+    });
+
+    expect(stripAnsi(warningRendered)).toContain("75.0%/1.0M (auto)");
+    expect(warningRendered).toContain("\x1b[38;2;255;255;0m75.0%/1.0M (auto)");
+    expect(stripAnsi(errorRendered)).toContain("92.0%/1.0M (auto)");
+    expect(errorRendered).toContain("\x1b[38;2;204;102;102m92.0%/1.0M (auto)");
+  });
+
+  it("uses env-selected Codex model, thinking effort, and context window metadata", () => {
+    const fixture = createFixture();
+    const runtime = createCodexWorkbenchRuntime({
+      ...fixture.env,
+      OPENSTRAT_CODEX_MODEL: "gpt-5.1-codex",
+      OPENSTRAT_CODEX_THINKING: "high",
+      OPENSTRAT_CODEX_CONTEXT_WINDOW: "1000000"
+    });
+
+    expect(runtime.kind).toBe("codex_sdk");
+    expect(runtime.displayModel).toBe("gpt-5.1-codex");
+    expect(runtime.thinking).toBe("high");
+    expect(runtime.contextWindow).toBe(1000000);
+  });
+
+  it("uses env-selected Codex model cycle candidates when provided", () => {
+    const fixture = createFixture();
+    const runtime = createCodexWorkbenchRuntime({
+      ...fixture.env,
+      OPENSTRAT_CODEX_MODEL: "gpt-5.1-codex",
+      OPENSTRAT_CODEX_MODELS: "gpt-5.1-codex, gpt-5.1-codex-high"
+    });
+
+    expect(runtime.displayModel).toBe("gpt-5.1-codex");
+    expect(runtime.availableModels).toEqual(["gpt-5.1-codex", "gpt-5.1-codex-high"]);
+  });
+
+  it("renders live SDK reasoning and tool lifecycle events as Pi-style typed states", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = attachScriptedInput(terminal, [
+      "inspect the strategy workspace",
+      "/exit"
+    ]);
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "reasoning_1",
+          type: "reasoning",
+          text: "I should inspect the local strategy files before responding."
+        }
+      },
+      {
+        type: "item.started",
+        item: {
+          id: "cmd_1",
+          type: "command_execution",
+          command: "pnpm test",
+          aggregated_output: "",
+          status: "in_progress"
+        }
+      },
+      {
+        type: "item.updated",
+        item: {
+          id: "cmd_1",
+          type: "command_execution",
+          command: "pnpm test",
+          aggregated_output: "RUN packages/cli/src/commands.test.ts",
+          status: "in_progress"
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "cmd_1",
+          type: "command_execution",
+          command: "pnpm test",
+          aggregated_output: "RUN packages/cli/src/commands.test.ts\n28 passed",
+          exit_code: 0,
+          status: "completed"
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "tool_1",
+          type: "mcp_tool_call",
+          server: "openstrat",
+          tool: "read_market",
+          arguments: { symbol: "SOL-PERP" },
+          error: { message: "market is not loaded" },
+          status: "failed"
+        }
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          cached_input_tokens: 25,
+          output_tokens: 20,
+          reasoning_output_tokens: 7
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const rawScreen = terminal.output;
+    const plain = stripAnsi(rawScreen);
+    expect(result.exitCode).toBe(0);
+    expect(rawScreen).toContain("\x1b[3m");
+    expect(rawScreen).toContain("\x1b[48;2;40;40;50m");
+    expect(rawScreen).toContain("\x1b[38;2;181;189;104m");
+    expect(rawScreen).toContain("\x1b[48;2;60;40;40m");
+    expect(plain).toContain(
+      "I should inspect the local strategy files before responding."
+    );
+    expect(plain).toContain("$ pnpm test");
+    expect((plain.match(/\$ pnpm test/g) ?? []).length).toBe(2);
+    expect(plain).toContain("RUN packages/cli/src/commands.test.ts");
+    expect(plain).toContain("28 passed");
+    expect(plain).toContain("read SOL-PERP");
+    expect(plain).toContain("market is not loaded");
+    expect(plain).toContain("scripted-final-response");
+    expect(plain).toContain("↑100");
+    expect(plain).toContain("↓20");
+    expect(plain).toContain("R7");
+    expect(plain).toContain("CH25.0%");
+    expect(plain).toContain("gpt-scripted • high");
+    expect(plain).not.toContain("codex: codex");
+    expect(stdout).toContain("bye");
+  });
+
+  it("renders MCP tool calls as Pi-style action rows when a target is clear", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 36);
+    const stdin = attachScriptedInput(terminal, ["inspect openstrat tools", "/exit"]);
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "turn.started"
+      },
+      {
+        type: "item.started",
+        item: {
+          id: "mcp_read_1",
+          type: "mcp_tool_call",
+          server: "openstrat",
+          tool: "market_data_read_snapshot",
+          arguments: { canonical_symbol: "SOL-PERP" },
+          status: "in_progress"
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "mcp_read_1",
+          type: "mcp_tool_call",
+          server: "openstrat",
+          tool: "market_data_read_snapshot",
+          arguments: { canonical_symbol: "SOL-PERP" },
+          result: {
+            content: [],
+            structured_content: { status: "completed", message: "market loaded" }
+          },
+          status: "completed"
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "mcp_check_1",
+          type: "mcp_tool_call",
+          server: "openstrat",
+          tool: "strategy_validate",
+          arguments: { strategy_file: "src/strategy.ts" },
+          error: { message: "missing dataset evidence" },
+          status: "failed"
+        }
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 42,
+          cached_input_tokens: 0,
+          output_tokens: 9,
+          reasoning_output_tokens: 0
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("read SOL-PERP");
+    expect(plain).toContain("check src/strategy.ts");
+    expect(plain).toContain("body");
+    expect(plain).toContain("market loaded");
+    expect(plain).toContain("stderr");
+    expect(plain).toContain("missing dataset evidence");
+    expect(plain).toContain("status completed");
+    expect(plain).toContain("status failed");
+    expect(plain).not.toContain("openstrat.market_data_read_snapshot");
+    expect(plain).not.toContain("openstrat.strategy_validate");
+    expect(stdout).toContain("bye");
+  });
+
+  it("renders SDK file changes as Pi-style write edit and delete rows", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 36);
+    const stdin = attachScriptedInput(terminal, ["apply file changes", "/exit"]);
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "turn.started"
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "file_add_1",
+          type: "file_change",
+          status: "completed",
+          changes: [{ path: "src/strategy.ts", kind: "add" }]
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "file_update_1",
+          type: "file_change",
+          status: "completed",
+          changes: [{ path: "src/risk.ts", kind: "update" }]
+        }
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "file_delete_1",
+          type: "file_change",
+          status: "failed",
+          changes: [{ path: "src/obsolete.ts", kind: "delete" }]
+        }
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 0,
+          output_tokens: 4,
+          reasoning_output_tokens: 0
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("write src/strategy.ts");
+    expect(plain).toContain("edit src/risk.ts");
+    expect(plain).toContain("delete src/obsolete.ts");
+    expect(plain).toContain("status completed");
+    expect(plain).toContain("status failed");
+    expect(plain).not.toContain("file_change completed");
+    expect(plain).not.toContain("file_change failed");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets ctrl-o expand the latest clipped tool output in the live TTY", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = new PassThrough();
+    const longOutput = Array.from({ length: 16 }, (_, index) => {
+      return `line ${index + 1}: scripted command output`;
+    }).join("\n");
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("inspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("\x0f");
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "cmd_1",
+          type: "command_execution",
+          command: "pnpm test",
+          aggregated_output: longOutput,
+          exit_code: 0,
+          status: "completed"
+        }
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          reasoning_output_tokens: 7
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain("ctrl+o to expand");
+    expect(plain).toContain("line 16: scripted command output");
+    expect(plain).toContain("ctrl+o to collapse");
+    const expandedOutputIndex = terminal.output.indexOf(
+      "line 16: scripted command output"
+    );
+    expect(terminal.output.lastIndexOf("\x1b[J", expandedOutputIndex)).toBeGreaterThan(
+      terminal.output.indexOf("ctrl+o to expand")
+    );
+    expect(plain).not.toContain("CHNaN");
+    expect(plain).not.toContain("\x0f");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets ctrl-t hide thinking traces in the live TTY", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("inspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("\x14");
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "reasoning_1",
+          type: "reasoning",
+          text: "I should inspect the local strategy files before responding."
+        }
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          reasoning_output_tokens: 7
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(plain).toContain(
+      "I should inspect the local strategy files before responding."
+    );
+    expect(plain).toContain("Thinking...");
+    expect(plain).not.toContain("\x14");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets shift-tab cycle thinking effort for the next live turn", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("\x1b[Zinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "auto"
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toContain("inspect the strategy workspace");
+    expect(runtime.turns[0]?.thinking).toBe("minimal");
+    expect(plain).toContain("gpt-scripted • minimal");
+    expect(plain).not.toContain("[Z");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets ctrl-p cycle Codex model for the next live turn", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("\x10inspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          reasoning_output_tokens: 7
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toContain("inspect the strategy workspace");
+    expect(runtime.turns[0]?.model).toBe("gpt-scripted-high");
+    expect(plain).toContain("gpt-scripted-high • high");
+    expect(plain).not.toContain("\x10");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets shift-ctrl-p cycle Codex model backward for the next live turn", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 28);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("\x1b[80;6uinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "high",
+      ["gpt-scripted", "gpt-scripted-low", "gpt-scripted-high"]
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toContain("inspect the strategy workspace");
+    expect(runtime.turns[0]?.model).toBe("gpt-scripted-high");
+    expect(plain).toContain("gpt-scripted-high • high");
+    expect(terminal.output).not.toContain("\x1b[80;6u");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets ctrl-l open a model selector and choose the next live turn model", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 30);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("\x0c\x1b[B\rinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "high",
+      ["gpt-scripted", "gpt-scripted-low", "gpt-scripted-high"]
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toContain("inspect the strategy workspace");
+    expect(runtime.turns[0]?.model).toBe("gpt-scripted-low");
+    expect(plain).toContain("model selector");
+    expect(plain).toContain(
+      "type to search | up/down choose | enter select | ctrl+c cancel"
+    );
+    expect(plain).not.toContain("enter s\nelect");
+    expect(terminal.output).toContain("\x1b[38;2;236;174;236mmodel selector");
+    expect(plain).toContain("gpt-scripted ✓ current");
+    expect(terminal.output).toContain("\x1b[38;2;126;186;126m✓ current");
+    expect(plain).toContain("› gpt-scripted-low");
+    expect(terminal.output).toContain("\x1b[38;2;236;174;236m› gpt-scripted-low");
+    expect(plain.split("\r").join("")).toContain(
+      `|            › gpt-scripted-low\n|              gpt-scripted-high\n+${"-".repeat(108)}+`
+    );
+    expect(plain).toContain("gpt-scripted-low • high");
+    expect(terminal.output).not.toContain("\x0c");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets /model open a selectable model menu and choose the next live turn model", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 30);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("/model\r\x1b[B\rinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "high",
+      ["gpt-scripted", "gpt-scripted-low", "gpt-scripted-high"]
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toBe("inspect the strategy workspace");
+    expect(runtime.turns[0]?.model).toBe("gpt-scripted-low");
+    expect(plain).toContain("model selector");
+    expect(plain).toContain("› gpt-scripted-low");
+    expect(plain).not.toContain("OpenStrat /model");
+    expect(plain).not.toContain("/modelinspect the strategy workspace");
+    expect(stdout).toContain("bye");
+  });
+
+  it("lets /effort open a selectable thinking effort menu for the next live turn", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 30);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("/effort\r\x1b[B\rinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "auto"
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toBe("inspect the strategy workspace");
+    expect(runtime.turns[0]?.thinking).toBe("minimal");
+    expect(plain).toContain("effort selector");
+    expect(plain).toContain("› minimal");
+    expect(plain).not.toContain("OpenStrat /effort");
+    expect(plain).not.toContain("/effortinspect the strategy workspace");
+    expect(stdout).toContain("bye");
+  });
+
+  it("filters the ctrl-l model selector by typed search without polluting the prompt", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(110, 30);
+    const stdin = new PassThrough();
+    let promptCount = 0;
+    terminal.onPrompt = () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        queueMicrotask(() => {
+          stdin.write("\x0chigh\rinspect the strategy workspace\n");
+        });
+        return;
+      }
+      if (promptCount === 2) {
+        queueMicrotask(() => {
+          stdin.write("/exit\n");
+          stdin.end();
+        });
+      }
+    };
+    const runtime = new ScriptedCodexRuntime(
+      [
+        {
+          type: "thread.started",
+          thread_id: "scripted_thread"
+        },
+        {
+          type: "turn.started"
+        },
+        {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            reasoning_output_tokens: 7
+          }
+        }
+      ],
+      "high",
+      ["gpt-scripted", "gpt-scripted-low", "gpt-scripted-high"]
+    );
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const plain = stripAnsi(terminal.output);
+    expect(result.exitCode).toBe(0);
+    expect(runtime.turns[0]?.prompt).toBe("inspect the strategy workspace");
+    expect(runtime.turns[0]?.model).toBe("gpt-scripted-high");
+    expect(plain).toContain("search: high");
+    expect(terminal.output).toContain("\x1b[38;2;236;174;236msearch:");
+    expect(plain).toContain("› gpt-scripted-high");
+    expect(terminal.output).toContain("\x1b[38;2;236;174;236m› gpt-scripted-high");
+    expect(plain).toContain("gpt-scripted-high • high");
+    expect(plain).not.toContain("highinspect the strategy workspace");
+    expect(stdout).toContain("bye");
+  });
+
+  it("renders streamed SDK turn failures as red terminal blocks", async () => {
+    const fixture = createFixture();
+    const stdout: string[] = [];
+    const terminal = new CapturingTtyWritable(100, 24);
+    const stdin = attachScriptedInput(terminal, ["please fail the turn", "/exit"]);
+    const runtime = new ScriptedCodexRuntime([
+      {
+        type: "thread.started",
+        thread_id: "scripted_thread"
+      },
+      {
+        type: "turn.started"
+      },
+      {
+        type: "turn.failed",
+        error: {
+          message: "SDK turn failed"
+        }
+      }
+    ]);
+
+    const result = await runOpenStratCli({
+      argv: [],
+      cwd: fixture.project,
+      env: fixture.env,
+      runtime,
+      stdin,
+      output: terminal,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stdout.push(line)
+    });
+
+    const rawScreen = terminal.output;
+    const plain = stripAnsi(rawScreen);
+    expect(result.exitCode).toBe(0);
+    expect(rawScreen).toContain("\x1b[48;2;60;40;40m");
+    expect(plain).toContain("turn failed");
+    expect(plain).toContain("SDK turn failed");
+    expect(plain).not.toContain("codex: codex");
+    expect(stdout).toContain("bye");
   });
 
   it("runs a headless prompt through the same session and artifact projection", async () => {
@@ -1079,12 +3301,60 @@ export default defineStrategy({
   );
 }
 
-function renderedTtyFrameHeights(output: string): number[] {
-  return output
-    .split("\x1b[H\x1b[2J")
-    .slice(1)
-    .map((frame) => frame.split("openstrat>")[0] ?? "")
-    .map((frame) => frame.split(/\r?\n/).filter((line) => line.length > 0).length);
+function attachScriptedInput(
+  terminal: CapturingTtyWritable,
+  lines: readonly string[]
+): PassThrough {
+  const stdin = new PassThrough();
+  const scriptedInput = [...lines];
+  terminal.onPrompt = () => {
+    const line = scriptedInput.shift();
+    if (line === undefined) {
+      return;
+    }
+    queueMicrotask(() => {
+      stdin.write(`${line}\n`);
+      if (scriptedInput.length === 0) {
+        stdin.end();
+      }
+    });
+  };
+  return stdin;
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(new RegExp(String.raw`\x1b\[[0-9;]*[A-Za-z]`, "g"), "");
+}
+
+class ScriptedCodexRuntime implements CodexWorkbenchRuntime {
+  readonly kind = "codex_sdk";
+  readonly displayModel = "gpt-scripted";
+  readonly availableModels: readonly string[];
+  readonly thinking: "auto" | ModelReasoningEffort;
+  readonly turns: CodexTurnInput[] = [];
+
+  constructor(
+    private readonly events: ThreadEvent[],
+    thinking: "auto" | ModelReasoningEffort = "high",
+    availableModels: readonly string[] = ["gpt-scripted", "gpt-scripted-high"]
+  ) {
+    this.thinking = thinking;
+    this.availableModels = availableModels;
+  }
+
+  async runTurn(input: CodexTurnInput) {
+    this.turns.push(input);
+    for (const event of this.events) {
+      input.onEvent?.(event);
+    }
+    return {
+      codexThreadId: "scripted_thread",
+      finalResponse: this.events.some((event) => event.type === "turn.failed")
+        ? ""
+        : "scripted-final-response",
+      events: this.events
+    };
+  }
 }
 
 class CapturingTtyWritable extends Writable {
@@ -1092,6 +3362,7 @@ class CapturingTtyWritable extends Writable {
   readonly columns: number;
   readonly rows: number;
   output = "";
+  onPrompt?: () => void;
 
   constructor(columns: number, rows = 40) {
     super();
@@ -1104,7 +3375,20 @@ class CapturingTtyWritable extends Writable {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void
   ): void {
-    this.output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+    this.output += text;
+    if (text.includes("openstrat>") && !text.includes("\r")) {
+      this.onPrompt?.();
+    }
     callback();
+  }
+}
+
+class PausingPassThrough extends PassThrough {
+  pauseCount = 0;
+
+  override pause(): this {
+    this.pauseCount += 1;
+    return super.pause() as this;
   }
 }

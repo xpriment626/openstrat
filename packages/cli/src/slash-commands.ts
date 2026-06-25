@@ -60,6 +60,8 @@ export const OPENSTRAT_SLASH_COMMANDS = [
   "/help",
   "/status",
   "/guide",
+  "/model",
+  "/effort",
   "/markets",
   "/datasets",
   "/strategy",
@@ -95,6 +97,18 @@ export async function handleSlashCommand(
         break;
       case "/guide":
         result = guideCommand(command, context);
+        break;
+      case "/model":
+        result = selectorCommand(
+          command,
+          "Open the interactive model selector in the live TUI."
+        );
+        break;
+      case "/effort":
+        result = selectorCommand(
+          command,
+          "Open the interactive thinking effort selector in the live TUI."
+        );
         break;
       case "/markets":
         result = await marketsCommand(command, args, context);
@@ -828,6 +842,17 @@ function compactCommand(
       summary_ref: session.summary_ref
     },
     session
+  };
+}
+
+function selectorCommand(command: string, summary: string): SlashCommandResult {
+  return {
+    command,
+    status: "ok",
+    summary,
+    data: {
+      interactive_only: true
+    }
   };
 }
 
