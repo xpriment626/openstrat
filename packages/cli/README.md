@@ -24,6 +24,23 @@ under `~/.openstrat`. It must not create, remove, or mutate the standalone Codex
 installation. If Codex is already installed, OpenStrat treats it as an external
 provider.
 
+For technical local-dev testing from a source checkout, build once and link the
+CLI package into your normal global npm prefix:
+
+```bash
+pnpm install
+pnpm build
+cd packages/cli
+npm link
+hash -r
+
+openstrat doctor
+```
+
+That global `openstrat` command is a symlink back to this checkout, so it can be
+run from any terminal and picks up future changes whenever `pnpm build` is run
+from the repo. Remove the source link with `npm unlink -g @openstrat/cli`.
+
 Before removing the package, review OpenStrat-owned state:
 
 ```bash
